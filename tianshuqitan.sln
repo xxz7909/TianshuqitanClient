@@ -1,0 +1,21 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TianshuQitanLauncher", "TianshuQitanLauncher.csproj", "{7B5F6732-DB6B-4CB8-9E37-5A0F530C6473}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x86 = Debug|x86
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7B5F6732-DB6B-4CB8-9E37-5A0F530C6473}.Debug|x86.ActiveCfg = Debug|x86
+		{7B5F6732-DB6B-4CB8-9E37-5A0F530C6473}.Debug|x86.Build.0 = Debug|x86
+		{7B5F6732-DB6B-4CB8-9E37-5A0F530C6473}.Release|x86.ActiveCfg = Release|x86
+		{7B5F6732-DB6B-4CB8-9E37-5A0F530C6473}.Release|x86.Build.0 = Release|x86
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
