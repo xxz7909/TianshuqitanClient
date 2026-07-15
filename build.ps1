@@ -24,6 +24,8 @@ New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     /reference:System.Windows.Forms.dll `
     "$root\src\Program.cs" `
     "$root\src\BrowserFeatureControl.cs" `
+    "$root\src\Compatibility.cs" `
+    "$root\src\Win32Util.cs" `
     "$root\src\LauncherConfig.cs" `
     "$root\src\Logger.cs" `
     "$root\src\MouseDiagnostics.cs" `

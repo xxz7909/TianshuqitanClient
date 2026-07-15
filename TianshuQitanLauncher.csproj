@@ -35,6 +35,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src\BrowserFeatureControl.cs" />
+    <Compile Include="src\Compatibility.cs" />
+    <Compile Include="src\Win32Util.cs" />
     <Compile Include="src\LauncherConfig.cs" />
     <Compile Include="src\Logger.cs" />
     <Compile Include="src\MainForm.cs" />
