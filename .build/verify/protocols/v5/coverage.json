@@ -1,0 +1,14 @@
+{
+  "profile": "v5",
+  "updatedUtc": "2026-08-31T10:33:00+08:00",
+  "features": [
+    { "id": "login", "name": "登录与会话", "status": "implemented", "baselineSession": "session-20260831-095654-523-登录.sqlite", "positiveScenario": "auto-login", "negativeScenario": null },
+    { "id": "character", "name": "角色创建与选择", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "world", "name": "地图与移动", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "inventory", "name": "背包与物品", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "quest", "name": "任务", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "combat", "name": "战斗", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "social", "name": "好友、公会与聊天", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null },
+    { "id": "trade", "name": "交易与经济", "status": "not_started", "baselineSession": null, "positiveScenario": null, "negativeScenario": null }
+  ]
+}

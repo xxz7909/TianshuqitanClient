@@ -17,6 +17,9 @@ namespace TianshuQitanLauncher
         public int BrowserHeight { get; private set; }
         public string BrowserAlign { get; private set; }
         public bool FixFlashPosition { get; private set; }
+        public string FlashWindowMode { get; private set; }
+        public bool FlashRepaintWorkaround { get; private set; }
+        public int FlashRepaintDelayMs { get; private set; }
         public bool TopMost { get; private set; }
         public bool ScriptErrorsSuppressed { get; private set; }
         public bool ReleaseMouseClip { get; private set; }
@@ -25,6 +28,15 @@ namespace TianshuQitanLauncher
         public bool MouseTopJumpGuardEnabled { get; private set; }
         public int MouseTopJumpThresholdPixels { get; private set; }
         public int MouseTopJumpReturnOffsetPixels { get; private set; }
+        public bool AudioFilterEnabled { get; private set; }
+        public int AudioFilterProxyPort { get; private set; }
+        public string FfmpegPath { get; private set; }
+        public string AudioFilterGraph { get; private set; }
+        public int AudioBitrateKbps { get; private set; }
+        public int AudioMp3Quality { get; private set; }
+        public string AudioCacheDirectory { get; private set; }
+        public string AudioSoundHost { get; private set; }
+        public string AudioSoundPathPrefix { get; private set; }
 
         private LauncherConfig()
         {
@@ -38,6 +50,9 @@ namespace TianshuQitanLauncher
             BrowserHeight = 600;
             BrowserAlign = "topLeft";
             FixFlashPosition = true;
+            FlashWindowMode = "window";
+            FlashRepaintWorkaround = true;
+            FlashRepaintDelayMs = 150;
             TopMost = false;
             ScriptErrorsSuppressed = true;
             ReleaseMouseClip = true;
@@ -46,6 +61,15 @@ namespace TianshuQitanLauncher
             MouseTopJumpGuardEnabled = true;
             MouseTopJumpThresholdPixels = 120;
             MouseTopJumpReturnOffsetPixels = 8;
+            AudioFilterEnabled = true;
+            AudioFilterProxyPort = 0;
+            FfmpegPath = "ffmpeg";
+            AudioFilterGraph = "highpass=f=25,lowpass=f=19000,afftdn=nr=6:nf=-50:tn=1:gs=6,adeclick=t=3,alimiter=limit=0.97";
+            AudioBitrateKbps = 0;
+            AudioMp3Quality = 2;
+            AudioCacheDirectory = "data/audio-cache";
+            AudioSoundHost = "resource.t.imop.com";
+            AudioSoundPathPrefix = "/sound";
         }
 
         public static LauncherConfig Load(string path)
@@ -74,6 +98,9 @@ namespace TianshuQitanLauncher
             config.BrowserHeight = ReadInt(values, "browserHeight", config.BrowserHeight, 240, 4320);
             config.BrowserAlign = ReadString(values, "browserAlign", config.BrowserAlign);
             config.FixFlashPosition = ReadBool(values, "fixFlashPosition", config.FixFlashPosition);
+            config.FlashWindowMode = ReadFlashWindowMode(values, "flashWindowMode", config.FlashWindowMode);
+            config.FlashRepaintWorkaround = ReadBool(values, "flashRepaintWorkaround", config.FlashRepaintWorkaround);
+            config.FlashRepaintDelayMs = ReadInt(values, "flashRepaintDelayMs", config.FlashRepaintDelayMs, 50, 2000);
             config.TopMost = ReadBool(values, "topMost", config.TopMost);
             config.ScriptErrorsSuppressed = ReadBool(values, "scriptErrorsSuppressed", config.ScriptErrorsSuppressed);
             config.ReleaseMouseClip = ReadBool(values, "releaseMouseClip", config.ReleaseMouseClip);
@@ -82,6 +109,15 @@ namespace TianshuQitanLauncher
             config.MouseTopJumpGuardEnabled = ReadBool(values, "mouseTopJumpGuardEnabled", config.MouseTopJumpGuardEnabled);
             config.MouseTopJumpThresholdPixels = ReadInt(values, "mouseTopJumpThresholdPixels", config.MouseTopJumpThresholdPixels, 20, 1000);
             config.MouseTopJumpReturnOffsetPixels = ReadInt(values, "mouseTopJumpReturnOffsetPixels", config.MouseTopJumpReturnOffsetPixels, 1, 200);
+            config.AudioFilterEnabled = ReadBool(values, "audioFilterEnabled", config.AudioFilterEnabled);
+            config.AudioFilterProxyPort = ReadInt(values, "audioFilterProxyPort", config.AudioFilterProxyPort, 0, 65535);
+            config.FfmpegPath = ReadString(values, "ffmpegPath", config.FfmpegPath);
+            config.AudioFilterGraph = ReadString(values, "audioFilterGraph", config.AudioFilterGraph);
+            config.AudioBitrateKbps = ReadInt(values, "audioBitrateKbps", config.AudioBitrateKbps, 0, 320);
+            config.AudioMp3Quality = ReadInt(values, "audioMp3Quality", config.AudioMp3Quality, 0, 9);
+            config.AudioCacheDirectory = ReadString(values, "audioCacheDirectory", config.AudioCacheDirectory);
+            config.AudioSoundHost = ReadString(values, "audioSoundHost", config.AudioSoundHost);
+            config.AudioSoundPathPrefix = ReadString(values, "audioSoundPathPrefix", config.AudioSoundPathPrefix);
 
             return config;
         }
@@ -165,6 +201,20 @@ namespace TianshuQitanLauncher
             }
 
             return value.Trim();
+        }
+
+        private static string ReadFlashWindowMode(Dictionary<string, string> values, string key, string defaultValue)
+        {
+            string value = ReadString(values, key, defaultValue);
+            if (string.Equals(value, "window", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "opaque", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "transparent", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "page", StringComparison.OrdinalIgnoreCase))
+            {
+                return value.ToLowerInvariant();
+            }
+
+            return defaultValue;
         }
 
         private static int ReadInt(Dictionary<string, string> values, string key, int defaultValue, int min, int max)

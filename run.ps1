@@ -1,3 +1,7 @@
+param(
+    [string]$Profile
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -7,4 +11,10 @@ if (-not (Test-Path $exe)) {
     & (Join-Path $root "build.ps1")
 }
 
-Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe)
+$arguments = @()
+if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+    $arguments += "--profile"
+    $arguments += $Profile
+}
+
+Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $exe)

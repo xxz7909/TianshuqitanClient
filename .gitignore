@@ -1,1 +1,10 @@
 bin/
+obj/
+packages/
+.tools/
+data/
+captures/
+docs/account.md
+*.tsqop.sqlite
+*.sqlite-wal
+*.sqlite-shm
