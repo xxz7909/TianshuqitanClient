@@ -1,0 +1,28 @@
+{
+  "name": "tianshu-headless-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"tsx watch src/server/index.ts\"",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "npm run check && vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/server/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
+  }
+}

@@ -28,6 +28,7 @@ namespace TianshuQitanLauncher.Protocol
         private readonly OperationBundleExporter operationBundleExporter;
         private ITransportCaptureEngine captureEngine;
         private ProtocolFrame lastFrame;
+        private string automationOwner;
         private bool activeMode;
         private bool disposed;
 
@@ -80,6 +81,37 @@ namespace TianshuQitanLauncher.Protocol
         public bool ActiveMode { get { lock (syncRoot) { return activeMode; } } }
         public IAtomicOperationRecorder OperationRecorder { get { return operationRecorder; } }
         public IOperationRepository Operations { get { return operationRepository; } }
+
+        public string CurrentAutomationOwner
+        {
+            get { lock (syncRoot) { return automationOwner; } }
+        }
+
+        public bool TryAcquireAutomation(string owner, out string currentOwner)
+        {
+            if (string.IsNullOrWhiteSpace(owner)) throw new ArgumentException("Automation owner is required.", "owner");
+            lock (syncRoot)
+            {
+                if (disposed) throw new ObjectDisposedException(GetType().Name);
+                if (string.IsNullOrEmpty(automationOwner) || string.Equals(automationOwner, owner, StringComparison.Ordinal))
+                {
+                    automationOwner = owner;
+                    currentOwner = owner;
+                    return true;
+                }
+                currentOwner = automationOwner;
+                return false;
+            }
+        }
+
+        public void ReleaseAutomation(string owner)
+        {
+            if (string.IsNullOrWhiteSpace(owner)) return;
+            lock (syncRoot)
+            {
+                if (string.Equals(automationOwner, owner, StringComparison.Ordinal)) automationOwner = null;
+            }
+        }
 
         public SessionDatabaseRenameResult RenameSessionDatabase(string sourceDatabasePath, string semanticName)
         {

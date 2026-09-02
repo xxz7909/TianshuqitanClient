@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="天书奇谈本地 TypeScript 无头协议客户端" />
+    <title>天书 · Headless Console</title>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">天</div>
+          <div>
+            <p class="eyebrow">LOCAL PROTOCOL GATEWAY</p>
+            <h1>天书 Headless Console</h1>
+          </div>
+        </div>
+        <div class="connection-pill" id="gateway-pill"><span></span><b>连接网关中</b></div>
+      </header>
+
+      <main class="workspace">
+        <aside class="panel login-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SESSION</p>
+              <h2>登录游戏</h2>
+            </div>
+            <span class="step-badge">01</span>
+          </div>
+
+          <form id="login-form" autocomplete="off">
+            <label>
+              <span>入口服地址</span>
+              <input id="login-host" name="loginHost" value="124.250.115.168" spellcheck="false" />
+            </label>
+            <label>
+              <span>候选端口</span>
+              <input id="login-ports" name="loginPorts" value="7800,7801,7802,7803" inputmode="numeric" />
+            </label>
+            <div class="field-grid">
+              <label>
+                <span>线路</span>
+                <select id="line" name="line">
+                  <option value="1">一线</option>
+                  <option value="2">二线</option>
+                  <option value="3">三线</option>
+                  <option value="4" selected>四线</option>
+                </select>
+              </label>
+              <label>
+                <span>角色槽位</span>
+                <select id="role-slot" name="roleSlot">
+                  <option value="1">第 1 个</option>
+                  <option value="2">第 2 个</option>
+                  <option value="3">第 3 个</option>
+                  <option value="4">第 4 个</option>
+                  <option value="5">第 5 个</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>账号</span>
+              <input id="username" name="username" autocomplete="off" />
+            </label>
+            <label>
+              <span>密码</span>
+              <input id="password" name="password" type="password" autocomplete="off" />
+            </label>
+            <details>
+              <summary>高级协议参数</summary>
+              <label>
+                <span>运营商编号 OPERATION_COM</span>
+                <input id="operation-com" name="operationCom" value="0" inputmode="numeric" />
+              </label>
+            </details>
+            <label class="check-row">
+              <input id="force-login" name="forceLogin" type="checkbox" />
+              <span><b>强制登录</b><small>仅在同账号仍被服务器判定在线时启用</small></span>
+            </label>
+            <div class="button-row">
+              <button class="primary" id="login-button" type="submit">建立会话</button>
+              <button class="secondary" id="disconnect-button" type="button">断开</button>
+            </div>
+          </form>
+
+          <div class="security-note">
+            <b>凭据只经过本机内存</b>
+            <p>页面不写入 localStorage；网关仅监听 127.0.0.1。游戏原协议自身仍是明文 TCP。</p>
+          </div>
+        </aside>
+
+        <section class="content-column">
+          <section class="hero panel">
+            <div>
+              <p class="eyebrow">CURRENT STATE</p>
+              <h2 id="session-state">等待连接</h2>
+              <p id="session-detail">正在连接本地 TypeScript 协议网关。</p>
+            </div>
+            <div class="metrics">
+              <div><span>心跳计数</span><strong id="heartbeat-count">—</strong></div>
+              <div><span>最近响应</span><strong id="heartbeat-latency">—</strong></div>
+              <div><span>收发帧</span><strong id="packet-count">0</strong></div>
+            </div>
+          </section>
+
+          <section class="data-grid">
+            <article class="panel compact-panel">
+              <div class="panel-heading small">
+                <div><p class="eyebrow">ROUTE</p><h3>线路解析</h3></div>
+              </div>
+              <div class="empty-state" id="server-list">登录后从 SC_GAMESERVER_LIST 实时解析</div>
+            </article>
+            <article class="panel compact-panel">
+              <div class="panel-heading small">
+                <div><p class="eyebrow">CHARACTER</p><h3>角色选择</h3></div>
+              </div>
+              <div class="empty-state" id="role-list">游戏服认证后显示角色槽位</div>
+            </article>
+          </section>
+
+          <section class="panel log-panel">
+            <div class="panel-heading small">
+              <div><p class="eyebrow">LIVE FRAMES</p><h3>协议事件</h3></div>
+              <button class="text-button" id="clear-log" type="button">清空显示</button>
+            </div>
+            <div class="log-header"><span>时间</span><span>方向</span><span>消息</span><span>长度</span></div>
+            <div class="log-body" id="packet-log" aria-live="polite"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/client/main.ts"></script>
+  </body>
+</html>

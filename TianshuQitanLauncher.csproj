@@ -32,6 +32,7 @@
     <Reference Include="System.Core" />
     <Reference Include="System.Data" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.IO.Compression" />
     <Reference Include="System.Security" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="EasyHook">
@@ -53,6 +54,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src\BrowserFeatureControl.cs" />
+    <Compile Include="src\ClientLogging.cs" />
+    <Compile Include="src\ClientLogControl.cs" />
     <Compile Include="src\AudioFilterProxy.cs" />
     <Compile Include="src\LauncherConfig.cs" />
     <Compile Include="src\LoginAutomation.cs" />
@@ -67,6 +70,10 @@
     <Compile Include="src\Protocol\AtomicOperationRecorder.cs" />
     <Compile Include="src\Protocol\AtomicOperationControl.cs" />
     <Compile Include="src\Protocol\BountyAutomation.cs" />
+    <Compile Include="src\Protocol\DonationAutomation.cs" />
+    <Compile Include="src\Protocol\MapTeleportAutomation.cs" />
+    <Compile Include="src\Protocol\MountainClimbAutomation.cs" />
+    <Compile Include="src\Protocol\RunLoopAutomation.cs" />
     <Compile Include="src\Protocol\HexCodec.cs" />
     <Compile Include="src\Protocol\LuaScenarioHost.cs" />
     <Compile Include="src\Protocol\OfflineReplayEngine.cs" />

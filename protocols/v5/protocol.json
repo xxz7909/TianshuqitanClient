@@ -1,6 +1,6 @@
 {
   "name": "Tianshu Qitan v5",
-  "version": "0.4.0",
+  "version": "0.9.0",
   "framing": {
     "mode": "LengthPrefix",
     "fixedLength": 0,
@@ -32,6 +32,28 @@
     { "direction": "ClientToServer", "opcode": 23, "name": "CS_NPC_FUNCTION", "status": "confirmed", "fields": [
       { "name": "npc_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
+    { "direction": "ClientToServer", "opcode": 24, "name": "CS_QUEST_ACTION", "status": "confirmed", "fields": [
+      { "name": "npc_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ClientToServer", "opcode": 29, "name": "CS_ITEM_TRANSFER", "status": "confirmed", "fields": [
+      { "name": "amount", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "source_slot", "type": "u16", "offset": 6, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "target_container", "type": "u16", "offset": 8, "length": 2, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ClientToServer", "opcode": 46, "name": "CS_UI_ACTION", "status": "confirmed", "fields": [
+      { "name": "action_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": { "169": "fly_to_coordinate", "172": "map_teleport_execute", "316": "map_teleport_select", "801": "one_key_hp_mp_recovery", "804": "open_flight_point_list", "953": "donation_confirm", "954": "inventory_refresh_ack" } },
+      { "name": "action_value", "type": "u32", "offset": 8, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "arg1", "type": "u32", "offset": 12, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "arg2", "type": "u32", "offset": 16, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "sequence", "type": "u32", "offset": 20, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ClientToServer", "opcode": 66, "name": "CS_CLIENT_PING", "status": "confirmed", "fields": [
+      { "name": "heartbeat_counter", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "server_time_high", "type": "u32", "offset": 8, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "server_time_low", "type": "u32", "offset": 12, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "transformed_auth_code", "type": "u32", "offset": 16, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "sequence", "type": "u32", "offset": 20, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
     { "direction": "ClientToServer", "opcode": 31, "name": "CS_COMBAT_ADVANCE", "status": "confirmed", "fields": [] },
     { "direction": "ClientToServer", "opcode": 76, "name": "CS_DIALOG_RESPONSE", "status": "confirmed", "fields": [
       { "name": "dialog_context", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
@@ -39,8 +61,15 @@
     { "direction": "ClientToServer", "opcode": 181, "name": "CS_EVENT_TRAVEL_LINK", "status": "confirmed", "fields": [
       { "name": "event_mode", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
-    { "direction": "ServerToClient", "opcode": 1, "name": "SC_LOGIN_RESULT", "status": "confirmed", "fields": [
-      { "name": "login_nonce", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
+    { "direction": "ClientToServer", "opcode": 193, "name": "CS_MAP_MOVEMENT", "status": "confirmed", "fields": [
+      { "name": "epoch_milliseconds", "type": "uint", "offset": 4, "length": 8, "endian": "Big", "enumValues": {} },
+      { "name": "map_id", "type": "u32", "offset": 12, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "scaled_x", "type": "u16", "offset": 16, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "scaled_y", "type": "u16", "offset": 18, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "sequence", "type": "u32", "offset": 20, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 1, "name": "SC_ACCOUNT_INFO", "status": "confirmed", "fields": [
+      { "name": "passport_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
     { "direction": "ServerToClient", "opcode": 12, "name": "SC_ROLE_INFO_LIST", "status": "confirmed", "fields": [
       { "name": "role_count", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} }
@@ -54,14 +83,46 @@
     { "direction": "ServerToClient", "opcode": 25, "name": "SC_NPC_REMOVED", "status": "confirmed", "fields": [
       { "name": "npc_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
+    { "direction": "ServerToClient", "opcode": 28, "name": "SC_MAP_ENTITY_LIST", "status": "confirmed", "fields": [] },
     { "direction": "ServerToClient", "opcode": 29, "name": "SC_NPC_DIALOG", "status": "confirmed", "fields": [
       { "name": "npc_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
+    { "direction": "ServerToClient", "opcode": 30, "name": "SC_QUEST_DETAIL", "status": "confirmed", "fields": [
+      { "name": "npc_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 36, "name": "SC_ITEM_UPDATE", "status": "confirmed", "fields": [
+      { "name": "bag_id", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "slot", "type": "u16", "offset": 6, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "stack_count", "type": "u16", "offset": 8, "length": 2, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 37, "name": "SC_ITEM_REMOVE", "status": "confirmed", "fields": [
+      { "name": "bag_id", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} },
+      { "name": "slot", "type": "u16", "offset": 6, "length": 2, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 39, "name": "SC_TASK_LIST_ENTRY", "status": "confirmed", "fields": [] },
     { "direction": "ServerToClient", "opcode": 41, "name": "SC_SYSTEM_MESSAGE", "status": "confirmed", "fields": [] },
     { "direction": "ServerToClient", "opcode": 44, "name": "SC_COMBAT_ACTION_PROMPT", "status": "confirmed", "fields": [] },
     { "direction": "ServerToClient", "opcode": 62, "name": "SC_TASK_UPDATE_HTML", "status": "confirmed", "fields": [] },
+    { "direction": "ServerToClient", "opcode": 63, "name": "SC_TASK_REMOVED", "status": "confirmed", "fields": [
+      { "name": "task_id_length", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 83, "name": "SC_SERVER_PING", "status": "confirmed", "fields": [
+      { "name": "heartbeat_counter", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "server_time_high", "type": "u32", "offset": 8, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "server_time_low", "type": "u32", "offset": 12, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "city_rate", "type": "u32", "offset": 16, "length": 4, "endian": "Big", "enumValues": {} },
+      { "name": "auth_flag", "type": "u16", "offset": 20, "length": 2, "endian": "Big", "enumValues": { "0": "encrypted_seed_present" } },
+      { "name": "auth_text_length", "type": "u16", "offset": 22, "length": 2, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 85, "name": "SC_MAP_INFO", "status": "confirmed", "fields": [
+      { "name": "map_id", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
     { "direction": "ServerToClient", "opcode": 92, "name": "SC_CONFIRM_DIALOG", "status": "confirmed", "fields": [
       { "name": "dialog_context", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
+    ] },
+    { "direction": "ServerToClient", "opcode": 106, "name": "SC_NEARBY_ENTITY_UPDATE", "status": "confirmed", "fields": [] },
+    { "direction": "ServerToClient", "opcode": 178, "name": "SC_INVENTORY_SNAPSHOT_ZLIB", "status": "confirmed", "fields": [
+      { "name": "zlib_length", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} }
     ] },
     { "direction": "ServerToClient", "opcode": 200, "name": "SC_CLIENT_TOKEN", "status": "confirmed", "fields": [
       { "name": "token_base64_length", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} }
@@ -69,7 +130,11 @@
     { "direction": "ServerToClient", "opcode": 201, "name": "SC_GAMESERVER_LIST", "status": "confirmed", "fields": [
       { "name": "server_count", "type": "u32", "offset": 4, "length": 4, "endian": "Big", "enumValues": {} }
     ] },
-    { "direction": "ServerToClient", "opcode": 229, "name": "SC_USER_INFO", "status": "confirmed", "fields": [] }
+    { "direction": "ServerToClient", "opcode": 229, "name": "SC_USER_INFO", "status": "confirmed", "fields": [] },
+    { "direction": "ServerToClient", "opcode": 290, "name": "SC_FLIGHT_POINT_LIST", "status": "confirmed", "fields": [] },
+    { "direction": "ServerToClient", "opcode": 966, "name": "SC_DONATION_PANEL_STATE", "status": "confirmed", "fields": [
+      { "name": "panel_state", "type": "u16", "offset": 4, "length": 2, "endian": "Big", "enumValues": {} }
+    ] }
   ],
   "stateTransitions": [
     { "fromState": "Connected", "toState": "CredentialsSubmitted", "direction": "ClientToServer", "opcode": 0, "event": "credentials_submitted", "fieldEquals": {} },

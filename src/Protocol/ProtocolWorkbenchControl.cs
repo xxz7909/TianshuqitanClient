@@ -15,6 +15,13 @@ namespace TianshuQitanLauncher.Protocol
         private const int MaximumUiFrames = 50000;
         private readonly ProtocolWorkbenchService service;
         private readonly AudioFilterProxy audioFilterProxy;
+        private readonly LoginAutomationCoordinator loginAutomation;
+        private readonly BountyAutomationCoordinator bountyAutomation;
+        private readonly DonationAutomationCoordinator donationAutomation;
+        private readonly RunLoopAutomationCoordinator runLoopAutomation;
+        private readonly MountainClimbAutomationCoordinator mountainClimbAutomation;
+        private readonly MapTeleportAutomationCoordinator mapTeleportAutomation;
+        private readonly ClientLogHub clientLogHub;
         private readonly List<TransportChunk> chunks = new List<TransportChunk>();
         private readonly List<ProtocolFrame> frames = new List<ProtocolFrame>();
         private readonly List<StateTransition> confirmedTransitions = new List<StateTransition>();
@@ -37,35 +44,96 @@ namespace TianshuQitanLauncher.Protocol
         private readonly RichTextBox luaEditor;
         private readonly DataGridView resultGrid;
         private readonly RichTextBox eventLog;
+        private readonly ClientLogControl clientLogControl;
+        private readonly SplitContainer logSplitContainer;
+        private readonly ToolStripButton logPaneButton;
+        private readonly TabControl featureTabs;
+        private readonly TabControl captureTabs;
         private readonly Timer refreshTimer;
+        private int expandedLogHeight = 200;
+        private bool logSplitterInitialized;
 
         public ProtocolWorkbenchControl(ProtocolWorkbenchService service)
-            : this(service, null, null, null, null)
+            : this(service, null, null, null, null, null)
         {
         }
 
         public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation)
-            : this(service, loginAutomation, null, null, null)
+            : this(service, loginAutomation, null, null, null, null)
         {
         }
 
         public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation, AudioFilterProxy audioFilterProxy)
-            : this(service, loginAutomation, audioFilterProxy, null, null)
+            : this(service, loginAutomation, audioFilterProxy, null, null, null)
         {
         }
 
         public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
             AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation)
-            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, null)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, null, null)
         {
         }
 
         public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
             AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
             MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, null, multiAccountManager)
         {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, null, multiAccountManager)
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, runLoopAutomation,
+                null, multiAccountManager)
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MountainClimbAutomationCoordinator mountainClimbAutomation, MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, runLoopAutomation,
+                mountainClimbAutomation, null, multiAccountManager)
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MountainClimbAutomationCoordinator mountainClimbAutomation,
+            MapTeleportAutomationCoordinator mapTeleportAutomation, MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, runLoopAutomation,
+                mountainClimbAutomation, mapTeleportAutomation, multiAccountManager, new ClientLogHub())
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MountainClimbAutomationCoordinator mountainClimbAutomation,
+            MapTeleportAutomationCoordinator mapTeleportAutomation, MultiAccountManager multiAccountManager,
+            ClientLogHub clientLogHub)
+        {
+            if (service == null) throw new ArgumentNullException("service");
+            if (clientLogHub == null) throw new ArgumentNullException("clientLogHub");
             this.service = service;
             this.audioFilterProxy = audioFilterProxy;
+            this.loginAutomation = loginAutomation;
+            this.bountyAutomation = bountyAutomation;
+            this.donationAutomation = donationAutomation;
+            this.runLoopAutomation = runLoopAutomation;
+            this.mountainClimbAutomation = mountainClimbAutomation;
+            this.mapTeleportAutomation = mapTeleportAutomation;
+            this.clientLogHub = clientLogHub;
             Dock = DockStyle.Fill;
             BackColor = SystemColors.Control;
 
@@ -126,6 +194,12 @@ namespace TianshuQitanLauncher.Protocol
             };
             ToolStripButton exportButton = new ToolStripButton("导出 PCAPNG");
             exportButton.Click += OnExportClick;
+            ToolStripButton clearDisplayCacheButton = new ToolStripButton("清空显示缓存");
+            clearDisplayCacheButton.ToolTipText = "释放数据包、协议帧和状态记录的界面内存；不会删除 SQLite 抓包记录，也不会停止抓包。";
+            clearDisplayCacheButton.Click += delegate { ClearDisplayCache(); };
+            logPaneButton = new ToolStripButton("日志") { CheckOnClick = true, Checked = true };
+            logPaneButton.ToolTipText = "显示或折叠固定在工作台底部的统一运行日志。";
+            logPaneButton.Click += delegate { SetLogPaneVisible(logPaneButton.Checked); };
             ToolStripButton renameDatabaseButton = new ToolStripButton("会话命名");
             renameDatabaseButton.Click += delegate { RenameCurrentDatabase(); };
             ToolStripButton copyDatabaseButton = new ToolStripButton("复制路径");
@@ -153,18 +227,36 @@ namespace TianshuQitanLauncher.Protocol
             toolStrip.Items.Add(runButton);
             toolStrip.Items.Add(replayButton);
             toolStrip.Items.Add(exportButton);
+            toolStrip.Items.Add(clearDisplayCacheButton);
+            toolStrip.Items.Add(logPaneButton);
             toolStrip.Items.Add(new ToolStripSeparator());
             toolStrip.Items.Add(renameDatabaseButton);
             toolStrip.Items.Add(copyDatabaseButton);
             toolStrip.Items.Add(databaseLabel);
 
-            TabControl tabs = new TabControl();
-            tabs.Dock = DockStyle.Fill;
+            featureTabs = new TabControl
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                SizeMode = TabSizeMode.Fixed,
+                ItemSize = new Size(86, 26)
+            };
+
+            captureTabs = new TabControl
+            {
+                Dock = DockStyle.Fill,
+                Multiline = false,
+                SizeMode = TabSizeMode.Normal
+            };
 
             packetGrid = CreateReadOnlyGrid();
+            packetGrid.MultiSelect = true;
+            packetGrid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             packetGrid.VirtualMode = true;
             packetGrid.CellValueNeeded += OnPacketCellValueNeeded;
             packetGrid.SelectionChanged += OnPacketSelectionChanged;
+            packetGrid.CellMouseDown += OnPacketCellMouseDown;
+            packetGrid.KeyDown += OnPacketGridKeyDown;
             AddColumn(packetGrid, "时间", 100);
             AddColumn(packetGrid, "连接", 55);
             AddColumn(packetGrid, "方向", 45);
@@ -173,6 +265,7 @@ namespace TianshuQitanLauncher.Protocol
             AddColumn(packetGrid, "动作", 65);
             AddColumn(packetGrid, "长度", 55);
             AddColumn(packetGrid, "Hex/ASCII", 250);
+            ConfigurePacketContextMenu();
             originalHex = CreateHexBox();
             effectiveHex = CreateHexBox();
             TabPage packetPage = new TabPage("数据包");
@@ -192,6 +285,8 @@ namespace TianshuQitanLauncher.Protocol
             connectionPage.Controls.Add(connectionGrid);
 
             frameGrid = CreateReadOnlyGrid();
+            frameGrid.MultiSelect = true;
+            frameGrid.ClipboardCopyMode = DataGridViewClipboardCopyMode.EnableWithoutHeaderText;
             AddColumn(frameGrid, "时间", 100);
             AddColumn(frameGrid, "连接", 55);
             AddColumn(frameGrid, "方向", 45);
@@ -202,6 +297,12 @@ namespace TianshuQitanLauncher.Protocol
             fieldTree = new TreeView { Dock = DockStyle.Fill };
             TabPage framePage = new TabPage("协议/字段");
             framePage.Controls.Add(CreateFrameLayout());
+
+            captureTabs.TabPages.Add(packetPage);
+            captureTabs.TabPages.Add(connectionPage);
+            captureTabs.TabPages.Add(framePage);
+            TabPage capturePage = new TabPage("抓包");
+            capturePage.Controls.Add(captureTabs);
 
             stateGrid = CreateReadOnlyGrid();
             AddColumn(stateGrid, "时间", 100);
@@ -228,7 +329,7 @@ namespace TianshuQitanLauncher.Protocol
             TabPage multiAccountPage = null;
             if (multiAccountManager != null)
             {
-                MultiAccountControl multiAccountControl = new MultiAccountControl(multiAccountManager);
+                MultiAccountControl multiAccountControl = new MultiAccountControl(multiAccountManager, clientLogHub);
                 multiAccountPage = new TabPage("多开管理");
                 multiAccountPage.Controls.Add(multiAccountControl);
             }
@@ -239,6 +340,38 @@ namespace TianshuQitanLauncher.Protocol
                 BountyAutomationControl bountyControl = new BountyAutomationControl(bountyAutomation);
                 bountyPage = new TabPage("自动除暴");
                 bountyPage.Controls.Add(bountyControl);
+            }
+
+            TabPage donationPage = null;
+            if (donationAutomation != null)
+            {
+                DonationAutomationControl donationControl = new DonationAutomationControl(donationAutomation);
+                donationPage = new TabPage("自动捐献");
+                donationPage.Controls.Add(donationControl);
+            }
+
+            TabPage runLoopPage = null;
+            if (runLoopAutomation != null)
+            {
+                RunLoopAutomationControl runLoopControl = new RunLoopAutomationControl(runLoopAutomation);
+                runLoopPage = new TabPage("自动跑环");
+                runLoopPage.Controls.Add(runLoopControl);
+            }
+
+            TabPage mountainClimbPage = null;
+            if (mountainClimbAutomation != null)
+            {
+                MountainClimbAutomationControl mountainClimbControl = new MountainClimbAutomationControl(mountainClimbAutomation);
+                mountainClimbPage = new TabPage("登山爬塔");
+                mountainClimbPage.Controls.Add(mountainClimbControl);
+            }
+
+            TabPage mapTeleportPage = null;
+            if (mapTeleportAutomation != null)
+            {
+                MapTeleportAutomationControl mapTeleportControl = new MapTeleportAutomationControl(mapTeleportAutomation);
+                mapTeleportPage = new TabPage("地图传送");
+                mapTeleportPage.Controls.Add(mapTeleportControl);
             }
 
             ruleBinding = new BindingList<PacketRule>(new List<PacketRule>(service.Rules.Rules));
@@ -278,21 +411,37 @@ namespace TianshuQitanLauncher.Protocol
             TabPage logPage = new TabPage("审计日志");
             logPage.Controls.Add(eventLog);
 
-            tabs.TabPages.Add(packetPage);
-            tabs.TabPages.Add(connectionPage);
-            tabs.TabPages.Add(framePage);
-            tabs.TabPages.Add(statePage);
-            if (multiAccountPage != null) tabs.TabPages.Add(multiAccountPage);
-            if (loginPage != null) tabs.TabPages.Add(loginPage);
-            if (bountyPage != null) tabs.TabPages.Add(bountyPage);
-            tabs.TabPages.Add(operationPage);
-            tabs.TabPages.Add(rulePage);
-            tabs.TabPages.Add(definitionPage);
-            tabs.TabPages.Add(luaPage);
-            tabs.TabPages.Add(resultPage);
-            tabs.TabPages.Add(logPage);
+            featureTabs.TabPages.Add(capturePage);
+            featureTabs.TabPages.Add(statePage);
+            if (multiAccountPage != null) featureTabs.TabPages.Add(multiAccountPage);
+            if (loginPage != null) featureTabs.TabPages.Add(loginPage);
+            if (bountyPage != null) featureTabs.TabPages.Add(bountyPage);
+            if (donationPage != null) featureTabs.TabPages.Add(donationPage);
+            if (runLoopPage != null) featureTabs.TabPages.Add(runLoopPage);
+            if (mountainClimbPage != null) featureTabs.TabPages.Add(mountainClimbPage);
+            if (mapTeleportPage != null) featureTabs.TabPages.Add(mapTeleportPage);
+            featureTabs.TabPages.Add(operationPage);
+            featureTabs.TabPages.Add(rulePage);
+            featureTabs.TabPages.Add(definitionPage);
+            featureTabs.TabPages.Add(luaPage);
+            featureTabs.TabPages.Add(resultPage);
+            featureTabs.TabPages.Add(logPage);
 
-            Controls.Add(tabs);
+            clientLogControl = new ClientLogControl(clientLogHub);
+            logSplitContainer = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Horizontal,
+                FixedPanel = FixedPanel.Panel2,
+                Panel1MinSize = 120,
+                Panel2MinSize = 120,
+                SplitterWidth = 5
+            };
+            logSplitContainer.Panel1.Controls.Add(featureTabs);
+            logSplitContainer.Panel2.Controls.Add(clientLogControl);
+            logSplitContainer.SizeChanged += OnLogSplitSizeChanged;
+
+            Controls.Add(logSplitContainer);
             Controls.Add(toolStrip);
             toolStrip.Dock = DockStyle.Top;
 
@@ -305,6 +454,7 @@ namespace TianshuQitanLauncher.Protocol
             service.ActiveModeChanged += OnActiveModeChanged;
             service.OperationRecordingStateChanged += OnOperationRecordingStateChanged;
             service.SessionDatabaseRenamed += OnSessionDatabaseRenamed;
+            SubscribeClientLogSources();
 
             refreshTimer = new Timer();
             refreshTimer.Interval = 500;
@@ -328,8 +478,110 @@ namespace TianshuQitanLauncher.Protocol
                 service.ActiveModeChanged -= OnActiveModeChanged;
                 service.OperationRecordingStateChanged -= OnOperationRecordingStateChanged;
                 service.SessionDatabaseRenamed -= OnSessionDatabaseRenamed;
+                UnsubscribeClientLogSources();
+                logSplitContainer.SizeChanged -= OnLogSplitSizeChanged;
             }
             base.Dispose(disposing);
+        }
+
+        private void SubscribeClientLogSources()
+        {
+            if (loginAutomation != null) loginAutomation.StatusChanged += OnLoginAutomationStatusChanged;
+            if (bountyAutomation != null) bountyAutomation.StatusChanged += OnBountyAutomationStatusChanged;
+            if (donationAutomation != null) donationAutomation.StatusChanged += OnDonationAutomationStatusChanged;
+            if (runLoopAutomation != null) runLoopAutomation.StatusChanged += OnRunLoopAutomationStatusChanged;
+            if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged += OnMountainClimbAutomationStatusChanged;
+            if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged += OnMapTeleportAutomationStatusChanged;
+            if (audioFilterProxy != null)
+            {
+                audioFilterProxy.StatusChanged += OnAudioFilterStatusChanged;
+                clientLogHub.Publish("BGM", ClientLogLevel.Info,
+                    audioFilterProxy.FilteringEnabled ? "启用" : "旁路", audioFilterProxy.LastStatus);
+            }
+        }
+
+        private void UnsubscribeClientLogSources()
+        {
+            if (loginAutomation != null) loginAutomation.StatusChanged -= OnLoginAutomationStatusChanged;
+            if (bountyAutomation != null) bountyAutomation.StatusChanged -= OnBountyAutomationStatusChanged;
+            if (donationAutomation != null) donationAutomation.StatusChanged -= OnDonationAutomationStatusChanged;
+            if (runLoopAutomation != null) runLoopAutomation.StatusChanged -= OnRunLoopAutomationStatusChanged;
+            if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged -= OnMountainClimbAutomationStatusChanged;
+            if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged -= OnMapTeleportAutomationStatusChanged;
+            if (audioFilterProxy != null) audioFilterProxy.StatusChanged -= OnAudioFilterStatusChanged;
+        }
+
+        private void OnLoginAutomationStatusChanged(LoginAutomationState state, string message)
+        {
+            PublishAutomationLog("自动登录", state.ToString(), message);
+        }
+
+        private void OnBountyAutomationStatusChanged(BountyAutomationState state, string message)
+        {
+            PublishAutomationLog("自动除暴", state.ToString(), message);
+        }
+
+        private void OnDonationAutomationStatusChanged(DonationAutomationState state, string message)
+        {
+            PublishAutomationLog("自动捐献", state.ToString(), message);
+        }
+
+        private void OnRunLoopAutomationStatusChanged(RunLoopAutomationState state, string message)
+        {
+            PublishAutomationLog("自动跑环", state.ToString(), message);
+        }
+
+        private void OnMountainClimbAutomationStatusChanged(MountainClimbAutomationState state, string message)
+        {
+            PublishAutomationLog("登山爬塔", state.ToString(), message);
+        }
+
+        private void OnMapTeleportAutomationStatusChanged(MapTeleportAutomationState state, string message)
+        {
+            PublishAutomationLog("地图传送", state.ToString(), message);
+        }
+
+        private void OnAudioFilterStatusChanged(string message)
+        {
+            clientLogHub.Publish("BGM", ClientLogLevel.Info,
+                audioFilterProxy != null && audioFilterProxy.FilteringEnabled ? "启用" : "旁路", message);
+        }
+
+        private void PublishAutomationLog(string module, string state, string message)
+        {
+            ClientLogLevel level = string.Equals(state, "Failed", StringComparison.OrdinalIgnoreCase)
+                ? ClientLogLevel.Error
+                : (string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase)
+                    ? ClientLogLevel.Warning
+                    : ClientLogLevel.Info);
+            clientLogHub.Publish(module, level, state, message);
+        }
+
+        private void OnLogSplitSizeChanged(object sender, EventArgs e)
+        {
+            if (logSplitterInitialized || logSplitContainer.Panel2Collapsed) return;
+            int available = logSplitContainer.ClientSize.Height - logSplitContainer.SplitterWidth;
+            if (available < logSplitContainer.Panel1MinSize + logSplitContainer.Panel2MinSize) return;
+            int desiredHeight = Math.Min(expandedLogHeight, available - logSplitContainer.Panel1MinSize);
+            logSplitContainer.SplitterDistance = available - Math.Max(logSplitContainer.Panel2MinSize, desiredHeight);
+            logSplitterInitialized = true;
+        }
+
+        private void SetLogPaneVisible(bool visible)
+        {
+            if (visible)
+            {
+                logSplitContainer.Panel2Collapsed = false;
+                logSplitterInitialized = false;
+                OnLogSplitSizeChanged(logSplitContainer, EventArgs.Empty);
+            }
+            else
+            {
+                if (!logSplitContainer.Panel2Collapsed && logSplitContainer.Panel2.Height >= logSplitContainer.Panel2MinSize)
+                    expandedLogHeight = logSplitContainer.Panel2.Height;
+                logSplitContainer.Panel2Collapsed = true;
+            }
+            logPaneButton.Checked = visible;
         }
 
         private Control CreatePacketLayout()
@@ -459,6 +711,223 @@ namespace TianshuQitanLauncher.Protocol
                     MessageBox.Show(this, ex.Message, "Export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+        }
+
+        private void ClearDisplayCache()
+        {
+            int chunkCount = chunks.Count;
+            int frameCount = frames.Count;
+            int transitionCount = confirmedTransitions.Count;
+
+            packetGrid.SuspendLayout();
+            frameGrid.SuspendLayout();
+            stateGrid.SuspendLayout();
+            try
+            {
+                packetGrid.ClearSelection();
+                packetGrid.CurrentCell = null;
+                chunks.Clear();
+                frames.Clear();
+                confirmedTransitions.Clear();
+
+                packetGrid.RowCount = 0;
+                frameGrid.Rows.Clear();
+                stateGrid.Rows.Clear();
+                originalHex.Clear();
+                effectiveHex.Clear();
+                fieldTree.Nodes.Clear();
+            }
+            finally
+            {
+                packetGrid.ResumeLayout();
+                frameGrid.ResumeLayout();
+                stateGrid.ResumeLayout();
+            }
+
+            GC.Collect(2, GCCollectionMode.Optimized);
+            service.ReportEngineEvent(
+                "Workbench",
+                "INFO",
+                "UI display cache cleared: chunks=" + chunkCount +
+                ", frames=" + frameCount + ", transitions=" + transitionCount +
+                ". SQLite capture data was preserved.",
+                null);
+        }
+
+        private void ConfigurePacketContextMenu()
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            ToolStripMenuItem copyRows = new ToolStripMenuItem("复制选中行");
+            copyRows.ShortcutKeyDisplayString = "Ctrl+C";
+            copyRows.Click += delegate { CopySelectedPacketRows(); };
+            ToolStripMenuItem copyEffectiveHex = new ToolStripMenuItem("复制有效数据 Hex");
+            copyEffectiveHex.Click += delegate { CopySelectedPacketBytes(false, false); };
+            ToolStripMenuItem copyOriginalHex = new ToolStripMenuItem("复制原始数据 Hex");
+            copyOriginalHex.Click += delegate { CopySelectedPacketBytes(true, false); };
+            ToolStripMenuItem copyEffectiveHexAscii = new ToolStripMenuItem("复制有效数据 Hex/ASCII");
+            copyEffectiveHexAscii.Click += delegate { CopySelectedPacketBytes(false, true); };
+            ToolStripMenuItem copyOriginalHexAscii = new ToolStripMenuItem("复制原始数据 Hex/ASCII");
+            copyOriginalHexAscii.Click += delegate { CopySelectedPacketBytes(true, true); };
+            ToolStripMenuItem selectAll = new ToolStripMenuItem("全选");
+            selectAll.ShortcutKeyDisplayString = "Ctrl+A";
+            selectAll.Click += delegate { SelectAllPackets(); };
+            ToolStripMenuItem clearSelected = new ToolStripMenuItem("清空选中数据包（仅界面）");
+            clearSelected.Click += delegate { ClearSelectedPackets(); };
+            ToolStripMenuItem clearAll = new ToolStripMenuItem("清空全部显示缓存（保留 SQLite）");
+            clearAll.Click += delegate { ClearDisplayCache(); };
+
+            menu.Items.Add(copyRows);
+            menu.Items.Add(copyEffectiveHex);
+            menu.Items.Add(copyOriginalHex);
+            menu.Items.Add(copyEffectiveHexAscii);
+            menu.Items.Add(copyOriginalHexAscii);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(selectAll);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(clearSelected);
+            menu.Items.Add(clearAll);
+            menu.Opening += delegate
+            {
+                int selectedCount = GetSelectedPacketIndexes().Count;
+                copyRows.Enabled = selectedCount > 0;
+                copyEffectiveHex.Enabled = selectedCount > 0;
+                copyOriginalHex.Enabled = selectedCount > 0;
+                copyEffectiveHexAscii.Enabled = selectedCount > 0;
+                copyOriginalHexAscii.Enabled = selectedCount > 0;
+                clearSelected.Enabled = selectedCount > 0;
+                copyRows.Text = selectedCount > 1 ? "复制选中行（" + selectedCount + " 条）" : "复制选中行";
+                clearSelected.Text = selectedCount > 1
+                    ? "清空选中数据包（" + selectedCount + " 条，仅界面）"
+                    : "清空选中数据包（仅界面）";
+                selectAll.Enabled = chunks.Count > 0;
+                clearAll.Enabled = chunks.Count > 0 || frames.Count > 0 || confirmedTransitions.Count > 0;
+            };
+            packetGrid.ContextMenuStrip = menu;
+        }
+
+        private void OnPacketCellMouseDown(object sender, DataGridViewCellMouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right || e.RowIndex < 0 || e.RowIndex >= packetGrid.RowCount) return;
+            DataGridViewRow row = packetGrid.Rows[e.RowIndex];
+            bool keepExistingSelection = row.Selected;
+            if (!keepExistingSelection)
+            {
+                if ((ModifierKeys & (Keys.Control | Keys.Shift)) == Keys.None)
+                    packetGrid.ClearSelection();
+                row.Selected = true;
+            }
+            int columnIndex = e.ColumnIndex >= 0 ? e.ColumnIndex : 0;
+            packetGrid.CurrentCell = row.Cells[columnIndex];
+        }
+
+        private void OnPacketGridKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!e.Control) return;
+            if (e.KeyCode == Keys.C)
+            {
+                CopySelectedPacketRows();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            else if (e.KeyCode == Keys.A)
+            {
+                SelectAllPackets();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+        }
+
+        private IList<int> GetSelectedPacketIndexes()
+        {
+            return packetGrid.SelectedRows.Cast<DataGridViewRow>()
+                .Select(row => row.Index)
+                .Where(index => index >= 0 && index < chunks.Count)
+                .Distinct()
+                .OrderBy(index => index)
+                .ToList();
+        }
+
+        private void SelectAllPackets()
+        {
+            if (packetGrid.RowCount == 0) return;
+            packetGrid.SelectAll();
+        }
+
+        private void CopySelectedPacketRows()
+        {
+            IList<int> indexes = GetSelectedPacketIndexes();
+            if (indexes.Count == 0) return;
+            StringBuilder text = new StringBuilder();
+            text.Append("时间\t连接\t方向\t操作\t类型\t动作\t长度\tEffective Hex\tASCII");
+            for (int i = 0; i < indexes.Count; i++)
+            {
+                TransportChunk chunk = chunks[indexes[i]];
+                ConnectionSession connection;
+                connections.TryGetValue(chunk.ConnectionId, out connection);
+                text.AppendLine();
+                text.Append(chunk.TimestampUtc.ToLocalTime().ToString("HH:mm:ss.fff")).Append('\t')
+                    .Append(chunk.ConnectionId).Append('\t')
+                    .Append(chunk.Direction == TrafficDirection.ClientToServer ? "C→S" : "S→C").Append('\t')
+                    .Append(chunk.Operation).Append('\t')
+                    .Append(connection == null ? ConnectionKind.Unknown : connection.Kind).Append('\t')
+                    .Append(chunk.RuleAction).Append('\t')
+                    .Append(chunk.Length).Append('\t')
+                    .Append(HexCodec.Format(chunk.EffectiveBytes)).Append('\t')
+                    .Append(HexCodec.FormatAscii(chunk.EffectiveBytes));
+            }
+            SetPacketClipboardText(text.ToString());
+        }
+
+        private void CopySelectedPacketBytes(bool original, bool includeAscii)
+        {
+            IList<int> indexes = GetSelectedPacketIndexes();
+            if (indexes.Count == 0) return;
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < indexes.Count; i++)
+            {
+                if (i > 0) text.AppendLine();
+                byte[] bytes = original ? chunks[indexes[i]].OriginalBytes : chunks[indexes[i]].EffectiveBytes;
+                text.Append(HexCodec.Format(bytes));
+                if (includeAscii) text.Append("  ").Append(HexCodec.FormatAscii(bytes));
+            }
+            SetPacketClipboardText(text.ToString());
+        }
+
+        private void SetPacketClipboardText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            try { Clipboard.SetText(text); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "复制数据包", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ClearSelectedPackets()
+        {
+            IList<int> indexes = GetSelectedPacketIndexes();
+            if (indexes.Count == 0) return;
+            packetGrid.SuspendLayout();
+            try
+            {
+                packetGrid.ClearSelection();
+                packetGrid.CurrentCell = null;
+                for (int i = indexes.Count - 1; i >= 0; i--) chunks.RemoveAt(indexes[i]);
+                packetGrid.RowCount = chunks.Count;
+                packetGrid.Invalidate();
+                originalHex.Clear();
+                effectiveHex.Clear();
+            }
+            finally
+            {
+                packetGrid.ResumeLayout();
+            }
+            GC.Collect(2, GCCollectionMode.Optimized);
+            service.ReportEngineEvent(
+                "Workbench",
+                "INFO",
+                "Selected UI packet rows cleared: chunks=" + indexes.Count + ". SQLite capture data was preserved.",
+                null);
         }
 
         private void OnPacketCellValueNeeded(object sender, DataGridViewCellValueEventArgs e)

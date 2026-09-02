@@ -32,7 +32,12 @@ namespace TianshuQitanLauncher
         private readonly ProtocolWorkbenchControl workbenchControl;
         private readonly LoginAutomationCoordinator loginAutomation;
         private readonly BountyAutomationCoordinator bountyAutomation;
+        private readonly DonationAutomationCoordinator donationAutomation;
+        private readonly RunLoopAutomationCoordinator runLoopAutomation;
+        private readonly MountainClimbAutomationCoordinator mountainClimbAutomation;
+        private readonly MapTeleportAutomationCoordinator mapTeleportAutomation;
         private readonly AudioFilterProxy audioFilterProxy;
+        private readonly ClientLogHub clientLogHub;
         private Rectangle previousBounds;
         private Point lastBrowserCursorPoint;
         private DateTime lastBrowserCursorAt;
@@ -105,8 +110,13 @@ namespace TianshuQitanLauncher
             ProtocolWorkbenchControl loadedControl = null;
             LoginAutomationCoordinator loadedLoginAutomation = null;
             BountyAutomationCoordinator loadedBountyAutomation = null;
+            DonationAutomationCoordinator loadedDonationAutomation = null;
+            RunLoopAutomationCoordinator loadedRunLoopAutomation = null;
+            MountainClimbAutomationCoordinator loadedMountainClimbAutomation = null;
+            MapTeleportAutomationCoordinator loadedMapTeleportAutomation = null;
             AudioFilterProxy loadedAudioFilterProxy = null;
             MultiAccountManager loadedMultiAccountManager = null;
+            ClientLogHub loadedClientLogHub = new ClientLogHub(ClientLogHub.DefaultCapacity);
             try
             {
                 AudioFilterProxyOptions audioOptions = new AudioFilterProxyOptions
@@ -147,6 +157,10 @@ namespace TianshuQitanLauncher
                         : instanceContext.CredentialPath);
                 loadedLoginAutomation = new LoginAutomationCoordinator(browser, loadedService, credentialStore);
                 loadedBountyAutomation = new BountyAutomationCoordinator(loadedService);
+                loadedDonationAutomation = new DonationAutomationCoordinator(loadedService);
+                loadedRunLoopAutomation = new RunLoopAutomationCoordinator(loadedService);
+                loadedMountainClimbAutomation = new MountainClimbAutomationCoordinator(loadedService);
+                loadedMapTeleportAutomation = new MapTeleportAutomationCoordinator(loadedService);
                 if (instanceContext != null && accountStore != null)
                 {
                     loadedMultiAccountManager = new MultiAccountManager(
@@ -157,13 +171,18 @@ namespace TianshuQitanLauncher
                         instanceContext);
                 }
                 loadedControl = new ProtocolWorkbenchControl(
-                    loadedService, loadedLoginAutomation, loadedAudioFilterProxy, loadedBountyAutomation,
-                    loadedMultiAccountManager);
+                    loadedService, loadedLoginAutomation, loadedAudioFilterProxy, loadedBountyAutomation, loadedDonationAutomation,
+                    loadedRunLoopAutomation, loadedMountainClimbAutomation, loadedMapTeleportAutomation, loadedMultiAccountManager,
+                    loadedClientLogHub);
                 mainSplit.Panel2.Controls.Add(loadedControl);
             }
             catch (Exception ex)
             {
                 if (loadedBountyAutomation != null) loadedBountyAutomation.Dispose();
+                if (loadedDonationAutomation != null) loadedDonationAutomation.Dispose();
+                if (loadedRunLoopAutomation != null) loadedRunLoopAutomation.Dispose();
+                if (loadedMountainClimbAutomation != null) loadedMountainClimbAutomation.Dispose();
+                if (loadedMapTeleportAutomation != null) loadedMapTeleportAutomation.Dispose();
                 if (loadedLoginAutomation != null) loadedLoginAutomation.Dispose();
                 Logger.Error("Cannot initialize protocol workbench", ex);
                 Label errorLabel = new Label();
@@ -178,8 +197,13 @@ namespace TianshuQitanLauncher
             workbenchControl = loadedControl;
             loginAutomation = loadedLoginAutomation;
             bountyAutomation = loadedBountyAutomation;
+            donationAutomation = loadedDonationAutomation;
+            runLoopAutomation = loadedRunLoopAutomation;
+            mountainClimbAutomation = loadedMountainClimbAutomation;
+            mapTeleportAutomation = loadedMapTeleportAutomation;
             audioFilterProxy = loadedAudioFilterProxy;
             multiAccountManager = loadedMultiAccountManager;
+            clientLogHub = loadedClientLogHub;
 
             flashRepaintTimer = new Timer();
             flashRepaintTimer.Interval = config.FlashRepaintDelayMs;
@@ -227,6 +251,22 @@ namespace TianshuQitanLauncher
             if (bountyAutomation != null)
             {
                 bountyAutomation.Dispose();
+            }
+            if (donationAutomation != null)
+            {
+                donationAutomation.Dispose();
+            }
+            if (runLoopAutomation != null)
+            {
+                runLoopAutomation.Dispose();
+            }
+            if (mountainClimbAutomation != null)
+            {
+                mountainClimbAutomation.Dispose();
+            }
+            if (mapTeleportAutomation != null)
+            {
+                mapTeleportAutomation.Dispose();
             }
             if (workbenchService != null)
             {

@@ -81,6 +81,10 @@ Runs of the same template can be selected together for ordered frame comparison 
 
 Use `会话命名` to append or replace a semantic suffix while preserving the timestamp prefix, for example `session-20260831-112228-317-除暴安良.sqlite`. The current live SQLite writer is safely checkpointed, closed, renamed, and reopened without ending capture. Session-name cells can also be edited directly; `Ctrl+C` copies the file name, `Ctrl+Shift+C` copies the full path, and the row context menu exposes both copy actions.
 
+抓包 SQLite 按客户端实例保存在 `data/instances/<instance-id>/sessions/`。实际完整路径、文件命名规则、当前路径复制方式，以及“清空显示缓存”与数据库保存之间的关系见 [数据包 SQLite 保存路径说明](docs/capture-sqlite-path.md)。
+
+“数据包”表格支持 `Ctrl+单击` 离散多选、`Shift+单击` 范围多选、`Ctrl+A` 全选和 `Ctrl+C` 复制选中行。右键菜单可以分别复制选中行、原始/有效 Hex、原始/有效 Hex/ASCII，也可以“清空选中数据包（仅界面）”或“清空全部显示缓存（保留 SQLite）”；两种清空操作都不会删除数据库中的抓包记录，也不会停止继续抓包。
+
 ## Auto login
 
 Open the `自动登录` workbench tab, enter an account and password, select `一线` through `四线` and a role slot from 1 through 5, then choose `保存配置` or `保存并登录`. Enabling automatic login repeats the full flow after the next page load.
@@ -89,7 +93,35 @@ Open the `自动登录` workbench tab, enter an account and password, select `�
 
 The password field is masked and the saved password is encrypted with Windows DPAPI for the current Windows user. The v5 wire protocol itself sends `CS_USER_PASS` credentials in plaintext and reuses a Base64 login ticket, so new captures redact the account, password, and ticket before SQLite storage, UI display, analysis bundles, or PCAPNG export. Existing session files are not rewritten automatically.
 
-The selected line is resolved from each live `SC_GAMESERVER_LIST (0x00C9)` response instead of hard-coding the recorded ports. The selected role is resolved from each live `SC_ROLE_INFO_LIST (0x000C)` response; completion is confirmed by `SC_ROLE_START_POINT (0x0016)`. See [the login protocol notes](docs/login-protocol.md), [the role-selection protocol notes](docs/role-selection-protocol.md), and [the bounty automation protocol notes](docs/bounty-protocol.md) for the confirmed layouts and state sequences.
+The selected line is resolved from each live `SC_GAMESERVER_LIST (0x00C9)` response instead of hard-coding the recorded ports. The selected role is resolved from each live `SC_ROLE_INFO_LIST (0x000C)` response; completion is confirmed by `SC_ROLE_START_POINT (0x0016)`. See [the login protocol notes](docs/login-protocol.md), [the role-selection protocol notes](docs/role-selection-protocol.md), [the heartbeat protocol notes](docs/heartbeat-protocol.md), [the bounty automation protocol notes](docs/bounty-protocol.md), [the guild donation protocol notes](docs/donation-protocol.md), [the run-loop protocol notes](docs/run-loop-protocol.md), and [the map-teleport protocol notes](docs/map-teleport-protocol.md) for the confirmed layouts and state sequences.
+
+## TypeScript 无头网页客户端
+
+根目录的 [`headlessclient`](headlessclient/README.md) 是不依赖 Flash 界面的第三方协议客户端原型。浏览器页面负责输入和状态展示，本机 Node 网关负责游戏原生 TCP；它已实现入口服认证、按实时列表选择一至四线、票据登录、角色槽位选择、进图和 `0x0053 → 0x0042` 心跳应答。账号密码不落盘，网关只监听 `127.0.0.1`。目前不包含地图渲染和完整玩法 UI。
+
+## 地图传送基础功能
+
+工作台“地图传送”页提供录制确认的 42 张地图及对应蟠龙图腾。可选择传送点 action 316/172 直传，也可用旧任务链接 `0x00B5` 瞬移到目标地图图腾；输入 X/Y 后还能自动到图腾、开启飞行列表并以 action 169 飞到指定坐标。所有流程使用当前连接的实时序号和服务端动态确认串，只有收到目标地图的 `SC_MAP_INFO (0x0055)` 才算成功。代码可调用 `TeleportTo`、`TeleportViaTotem` 和 `FlyTo`，详见 `docs/map-teleport-protocol.md`。
+
+供其他功能衔接的高层函数是 `MapTeleportAutomationCoordinator.TeleportTo(int mapId)` 和 `TeleportTo(string mapNameOrId)`；已持有自动化锁的状态机可以直接使用 `TianshuMapTeleportProtocol.BuildSelectMap`、`BuildTeleportToMap` 和 `TianshuMapTeleportCatalog`。完整接口、协议字段及 42 张地图目录见 [地图传送基础功能](docs/map-teleport-protocol.md)。
+
+## 自动跑环
+
+工作台“自动跑环”页可设置本次 1–4 轮；每轮固定 20 环，并按每日最多 4 轮做界面和状态机硬限制。程序从实时 `SC_TASK_UPDATE (0x003E)` 解析提交道具或战斗任务、地图、NPC、坐标及进度。战斗环抵达目标地图后每 500 ms 发送一次小范围走步，约 5 秒为一批，并在战斗等待期间每 4 秒发送一次一键恢复 HP/MP；进度完成后自动返回 NPC 交付下一环。
+
+所有请求使用当前游戏连接的实时序号，传送确认使用服务端本次随机 token。未录制的地图入口或无法确认的 NPC ID 会安全停止，不发送猜测报文。详见 [自动跑环协议与状态机](docs/run-loop-protocol.md)。
+
+## 自动登山爬塔
+
+工作台“登山爬塔”页会按录制库完成三项登山任务：飞行到三界关高攀攀接取任务，进入皇城皇宫和通天塔，通过通天塔传送人直达无间境十层交付，再到元荒境五层交付；随后从时雨山脚按走步帧经过半天坡进入清溪云涧交付，最后返回皇城皇宫。开始和停止按钮会与其他发包自动化互斥；同一客户端运行期间再次启动会跳过已由服务端确认完成的任务。
+
+任务接取/交付使用已确认的 `0x0017 + 0x0018` 两阶段序列，飞行确认 token 和请求序号均取实时连接；塔层、山路只发送录制中验证过的 `0x00C1` 走步帧和 `0x0016` 进图帧。背包不足、地图不符或等待超时时会安全停止，不会自动丢弃物品。详见 [登山爬塔协议与状态机](docs/mountain-climb-protocol.md)。
+
+## 自动捐献上古神器碎片
+
+角色站在帮会捐献官附近后，打开工作台的“自动捐献”页并点击“开始自动捐献”。程序会按道具名称 `上古神器碎片(一等)` 和物品 ID `115000140` 自动查询实时背包格，无需用户指定位置；每次成功且确认背包扣减后继续，直到服务端次数耗尽、碎片耗尽或达到安全上限。
+
+NPC 功能 ID、背包格和请求序号都从当前会话动态取得，不会重放录制值。自动捐献与自动除暴互斥，防止两个流程同时竞争请求序号。协议证据和停止条件见 [帮派捐献协议与自动化状态机](docs/donation-protocol.md)。
 
 ## 多开与多账户
 

@@ -3,11 +3,14 @@ using System.Collections.Generic;
 using System.Data.SQLite;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Windows.Forms;
 using Newtonsoft.Json;
 using TianshuQitanLauncher;
 using TianshuQitanLauncher.Protocol;
@@ -32,9 +35,36 @@ namespace TianshuQitanLauncher.Tests
                 Run("State tracker", TestStateTracker);
                 Run("Login protocol parsing and redaction", TestLoginProtocol);
                 Run("Bounty protocol parsing and packet builders", TestBountyProtocol);
+                Run("Donation protocol parsing and packet builders", TestDonationProtocol);
+                Run("Run-loop protocol parsing and packet builders", TestRunLoopProtocol);
+                Run("Mountain-climb protocol parsing and packet builders", TestMountainClimbProtocol);
+                Run("Map-teleport protocol and recorded destination catalog", TestMapTeleportProtocol);
+                Run("Unified client logging and fixed GUI", delegate { TestClientLogging(root); });
+                Run("Packet-grid multi-select and context actions", delegate { TestPacketGridInteractions(root); });
                 string bountyRecording = Environment.GetEnvironmentVariable("TIANSHU_BOUNTY_SAMPLE");
                 if (!string.IsNullOrWhiteSpace(bountyRecording))
                     Run("Recorded bounty SQLite replay", delegate { TestRecordedBounty(bountyRecording); });
+                string donationRecording = Environment.GetEnvironmentVariable("TIANSHU_DONATION_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(donationRecording))
+                    Run("Recorded donation SQLite replay", delegate { TestRecordedDonation(donationRecording); });
+                string donationConfirmRecording = Environment.GetEnvironmentVariable("TIANSHU_DONATION_CONFIRM_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(donationConfirmRecording))
+                    Run("Recorded donation-confirm SQLite replay", delegate { TestRecordedDonationConfirmation(donationConfirmRecording); });
+                string inventorySnapshotRecording = Environment.GetEnvironmentVariable("TIANSHU_INVENTORY_SNAPSHOT_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(inventorySnapshotRecording))
+                    Run("Recorded initial inventory snapshot replay", delegate { TestRecordedInventorySnapshot(inventorySnapshotRecording); });
+                string runLoopRecording = Environment.GetEnvironmentVariable("TIANSHU_RUN_LOOP_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(runLoopRecording))
+                    Run("Recorded run-loop SQLite replay", delegate { TestRecordedRunLoop(runLoopRecording); });
+                string mountainClimbRecording = Environment.GetEnvironmentVariable("TIANSHU_MOUNTAIN_CLIMB_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(mountainClimbRecording))
+                    Run("Recorded mountain-climb SQLite replay", delegate { TestRecordedMountainClimb(mountainClimbRecording); });
+                string mountainShortcutRecording = Environment.GetEnvironmentVariable("TIANSHU_MOUNTAIN_SHORTCUT_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(mountainShortcutRecording))
+                    Run("Recorded mountain-climb shortcut SQLite replay", delegate { TestRecordedMountainShortcut(mountainShortcutRecording); });
+                string mapTeleportRecording = Environment.GetEnvironmentVariable("TIANSHU_MAP_TELEPORT_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(mapTeleportRecording))
+                    Run("Recorded map-teleport SQLite replay", delegate { TestRecordedMapTeleport(mapTeleportRecording); });
                 Run("DPAPI login credential store", delegate { TestLoginCredentialStore(root); });
                 Run("Multi-account process isolation", delegate { TestMultiAccountIsolation(root); });
                 Run("SQLite and PCAPNG", delegate { TestStoreAndPcapng(root); });
@@ -156,6 +186,1036 @@ namespace TianshuQitanLauncher.Tests
             return frame;
         }
 
+        private static void TestDonationProtocol()
+        {
+            byte[] request = TianshuDonationProtocol.BuildDonateItem(0x12, 0x112);
+            AssertEqual("00 12 00 1D 00 01 00 12 00 99 00 00 00 00 00 00 01 12",
+                HexCodec.Format(request), "captured donation request");
+            ushort parsedSlot;
+            uint parsedSequence;
+            Assert(TianshuDonationProtocol.TryParseDonationRequest(request, out parsedSlot, out parsedSequence),
+                "donation request parser");
+            AssertEqual((ushort)0x12, parsedSlot, "dynamic source slot");
+            AssertEqual(0x112U, parsedSequence, "dynamic donation sequence");
+
+            byte[] confirm = TianshuDonationProtocol.BuildDonationConfirm(0x30);
+            AssertEqual("00 18 00 2E 00 00 03 B9 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 30",
+                HexCodec.Format(confirm), "captured donation button request");
+            Assert(TianshuDonationProtocol.TryParseDonationConfirm(confirm, out parsedSequence),
+                "donation button request parser");
+            AssertEqual(0x30U, parsedSequence, "dynamic donation button sequence");
+
+            byte[] itemUpdate = BuildInventoryUpdateFrame(1, 0x12, 42, "上古神器碎片(一等)", "115000140");
+            DonationInventoryItem item;
+            Assert(TianshuDonationProtocol.TryParseInventoryUpdate(itemUpdate, out item), "inventory update parser");
+            Assert(item.IsTargetFragment, "target item identified by name/id");
+            AssertEqual((ushort)42, item.Count, "target stack count");
+            AssertEqual((ushort)0x12, item.Slot, "target stack slot");
+
+            IList<DonationInventoryItem> snapshotItems;
+            Assert(TianshuDonationProtocol.TryParseInventorySnapshot(BuildInventorySnapshotFrame(1, 13, 730), out snapshotItems),
+                "zlib initial inventory snapshot parser");
+            AssertEqual(1, snapshotItems.Count, "target item count in initial snapshot");
+            AssertEqual((ushort)13, snapshotItems[0].Slot, "initial snapshot source slot");
+            AssertEqual((ushort)730, snapshotItems[0].Count, "initial snapshot stack count");
+
+            byte[] removal = new byte[] { 0, 8, 0, 0x25, 0, 1, 0, 0x12 };
+            ushort bag;
+            ushort removedSlot;
+            Assert(TianshuDonationProtocol.TryParseInventoryRemoval(removal, out bag, out removedSlot), "inventory removal parser");
+            AssertEqual((ushort)1, bag, "removed source bag");
+            AssertEqual((ushort)0x12, removedSlot, "removed source slot");
+
+            ushort panelState;
+            Assert(TianshuDonationProtocol.TryParsePanelReady(new byte[] { 0, 6, 3, 0xC6, 0, 3 }, out panelState),
+                "donation panel parser");
+            AssertEqual((ushort)3, panelState, "donation panel ready state");
+
+            byte[] dialog = BuildNpcDialogFrame(TianshuDonationProtocol.DefaultDonationNpcId,
+                "帮会捐献官", "帮派捐献", "9991523");
+            int npcId;
+            string functionId;
+            Assert(TianshuBountyProtocol.TryParseNpcFunction(dialog, TianshuDonationProtocol.DonationFunctionLabel,
+                out npcId, out functionId), "dynamic donation function parser");
+            AssertEqual(TianshuDonationProtocol.DefaultDonationNpcId, npcId, "donation npc id");
+            AssertEqual("9991523", functionId, "dynamic donation function id");
+
+            Assert(TianshuDonationProtocol.IsDonationSuccess(BuildServerStringFrame(
+                TianshuBountyProtocol.ServerSystemMessage,
+                "感谢你为帮派作出的贡献！帮派贡献增加650点，奖励你3250点元魄值!")), "donation success message");
+            Assert(TianshuDonationProtocol.IsDonationLimit(BuildServerStringFrame(
+                TianshuBountyProtocol.ServerSystemMessage, "今日捐献次数已达到上限")), "donation limit message");
+            Assert(TianshuDonationProtocol.IsDonationContainerEmpty(BuildServerStringFrame(
+                TianshuBountyProtocol.ServerSystemMessage, "你还没有放入物品呢！")), "empty donation container message");
+        }
+
+        private static void TestRunLoopProtocol()
+        {
+            byte[] movement = HexCodec.Parse("00 18 00 C1 00 00 01 A0 5C 98 8C 08 00 00 00 6F 03 C0 04 20 00 00 00 B7");
+            long timestamp;
+            int mapId;
+            ushort x;
+            ushort y;
+            Assert(TianshuRunLoopProtocol.TryParseMovement(movement, out timestamp, out mapId, out x, out y),
+                "captured movement parser");
+            AssertEqual(111, mapId, "movement map id");
+            AssertEqual((ushort)0x03C0, x, "movement scaled x");
+            AssertEqual((ushort)0x0420, y, "movement scaled y");
+            AssertEqual(HexCodec.Format(movement),
+                HexCodec.Format(TianshuRunLoopProtocol.BuildMovement(timestamp, mapId, x, y, 0xB7)),
+                "captured movement reconstructed with live sequence");
+
+            byte[] recovery = HexCodec.Parse("00 18 00 2E 00 00 03 21 00 00 00 01 00 00 00 03 00 00 00 00 00 00 00 B8");
+            Assert(TianshuRunLoopProtocol.TryParseOneKeyRecovery(recovery), "captured one-key recovery parser");
+            AssertEqual(HexCodec.Format(recovery), HexCodec.Format(TianshuRunLoopProtocol.BuildOneKeyRecovery(0xB8)),
+                "captured one-key recovery reconstructed");
+
+            byte[] deliveryFrame = BuildRunLoopTaskFrame(19,
+                "将玉雕送给到逐浪广场的海蚌族 蚌岳珊(2,16)，并领取下一环任务。", "玉雕 (0/1),");
+            RunLoopTask delivery;
+            Assert(TianshuRunLoopProtocol.TryParseTask(deliveryFrame, out delivery), "delivery task parser");
+            AssertEqual(19, delivery.RingNumber, "delivery ring");
+            AssertEqual(RunLoopTaskKind.DeliverItem, delivery.Kind, "delivery kind");
+            AssertEqual("逐浪广场", delivery.TurnInMapName, "delivery map");
+            AssertEqual("海蚌族蚌岳珊", delivery.TurnInNpcName, "delivery npc normalization");
+            AssertEqual(2, delivery.TurnInX, "delivery x");
+
+            byte[] huntFrame = BuildRunLoopTaskFrame(1,
+                "去百鸟树林消灭5个金翅雏鸟后，到近天回廊的天空远征军斥候武诚初(20,66)处领取下一环任务。",
+                "金翅雏鸟 (5/5),");
+            RunLoopTask hunt;
+            Assert(TianshuRunLoopProtocol.TryParseTask(huntFrame, out hunt), "hunt task parser");
+            AssertEqual(RunLoopTaskKind.Hunt, hunt.Kind, "hunt kind");
+            AssertEqual("百鸟树林", hunt.HuntMapName, "hunt map");
+            AssertEqual(5, hunt.Progress, "hunt progress");
+            Assert(hunt.IsComplete, "hunt completion");
+
+            string encodedHtml = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                "<p>将玉雕送给到逐浪广场的<a href=\"event:x:2,y:16,m:102,n:94018\">海蚌族 蚌岳珊</a>(2,16)，并领取下一环任务。</p>"));
+            byte[] encodedDeliveryFrame = BuildRunLoopTaskFrame(19, encodedHtml, "玉雕 (0/1),");
+            RunLoopTask encodedDelivery;
+            Assert(TianshuRunLoopProtocol.TryParseTask(encodedDeliveryFrame, out encodedDelivery),
+                "base64 HTML delivery task parser");
+            AssertEqual(94018, encodedDelivery.TurnInNpcId, "task-link npc id from base64 HTML");
+            AssertEqual(102, encodedDelivery.TurnInMapId, "task-link map id from base64 HTML");
+            AssertEqual("海蚌族蚌岳珊", encodedDelivery.TurnInNpcName, "HTML task npc normalization");
+
+            byte[] mapFrame;
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, (byte)TianshuRunLoopProtocol.ServerMapInfo }, 0, 4);
+                WriteUInt32BigEndian(stream, 100);
+                WriteUtf8String(stream, "怒焰祭坛");
+                WriteUInt32BigEndian(stream, 0x1E0);
+                WriteUInt32BigEndian(stream, 0x70);
+                mapFrame = stream.ToArray();
+                mapFrame[0] = (byte)(mapFrame.Length >> 8);
+                mapFrame[1] = (byte)mapFrame.Length;
+            }
+            RunLoopMapInfo map;
+            Assert(TianshuRunLoopProtocol.TryParseMapInfo(mapFrame, out map), "map info parser");
+            AssertEqual(100, map.MapId, "map info id");
+            AssertEqual((ushort)0x1E0, map.ScaledX, "map info spawn x");
+        }
+
+        private static void TestMountainClimbProtocol()
+        {
+            byte[] accept = HexCodec.Parse(
+                "00 1D 00 18 00 01 6B 87 00 09 39 33 38 32 39 30 32 2E 31 00 00 00 00 00 00 00 00 00 1D");
+            AssertEqual(HexCodec.Format(accept), HexCodec.Format(TianshuMountainClimbProtocol.BuildQuestAction(
+                93063, TianshuMountainClimbProtocol.BraveTowerAcceptFunction, false, 0x1D)),
+                "captured mountain task acceptance reconstructed");
+            byte[] turnIn = HexCodec.Parse(
+                "00 1D 00 18 00 00 1F 8B 00 09 39 33 38 32 39 30 32 2E 32 00 01 00 00 00 00 00 00 01 B7");
+            AssertEqual(HexCodec.Format(turnIn), HexCodec.Format(TianshuMountainClimbProtocol.BuildQuestAction(
+                8075, TianshuMountainClimbProtocol.BraveTowerTurnInFunction, true, 0x1B7)),
+                "captured mountain task turn-in reconstructed");
+
+            int npcId;
+            string functionId;
+            bool parsedTurnIn;
+            uint sequence;
+            Assert(TianshuMountainClimbProtocol.TryParseQuestAction(turnIn, out npcId, out functionId,
+                out parsedTurnIn, out sequence), "mountain quest action parser");
+            AssertEqual(8075, npcId, "mountain turn-in npc");
+            AssertEqual(TianshuMountainClimbProtocol.BraveTowerTurnInFunction, functionId, "mountain turn-in function");
+            Assert(parsedTurnIn, "mountain turn-in flag");
+            AssertEqual(0x1B7U, sequence, "mountain turn-in sequence");
+
+            byte[] directTeleport = HexCodec.Parse(
+                "00 15 00 17 00 00 1F 76 00 07 39 39 39 32 30 34 30 00 00 00 B5");
+            AssertEqual(HexCodec.Format(directTeleport), HexCodec.Format(TianshuBountyProtocol.BuildNpcFunction(
+                TianshuMountainClimbProtocol.TowerTeleporterNpcId,
+                TianshuMountainClimbProtocol.BraveTowerDirectTeleportFunction, 0xB5)),
+                "captured direct teleport to brave-tower destination reconstructed");
+
+            Assert(TianshuMountainClimbProtocol.IsQuestDetail(BuildServerStringFrame(
+                TianshuMountainClimbProtocol.ServerQuestDetail,
+                TianshuMountainClimbProtocol.FirstTowerTurnInFunction),
+                TianshuMountainClimbProtocol.FirstTowerTurnInFunction), "mountain quest detail detection");
+            Assert(TianshuMountainClimbProtocol.IsTaskAccepted(BuildServerStringFrame(
+                TianshuBountyProtocol.ServerTaskUpdate, TianshuMountainClimbProtocol.RainMountainTaskId),
+                TianshuMountainClimbProtocol.RainMountainTaskId), "mountain task acceptance detection");
+            Assert(TianshuMountainClimbProtocol.IsTaskRemoved(BuildServerStringFrame(
+                TianshuMountainClimbProtocol.ServerTaskRemoved, TianshuMountainClimbProtocol.RainMountainTaskId),
+                TianshuMountainClimbProtocol.RainMountainTaskId), "mountain task removal detection");
+        }
+
+        private static void TestMapTeleportProtocol()
+        {
+            byte[] select = HexCodec.Parse(
+                "00 18 00 2E 00 00 01 3C 00 00 00 56 00 00 00 00 00 00 00 00 00 00 00 20");
+            byte[] execute = HexCodec.Parse(
+                "00 18 00 2E 00 00 00 AC 00 00 00 56 00 00 00 00 00 00 00 00 00 00 00 21");
+            AssertEqual(HexCodec.Format(select), HexCodec.Format(TianshuMapTeleportProtocol.BuildSelectMap(86, 0x20)),
+                "captured map-select action reconstructed");
+            AssertEqual(HexCodec.Format(execute), HexCodec.Format(TianshuMapTeleportProtocol.BuildTeleportToMap(86, 0x21)),
+                "captured map-teleport action reconstructed");
+
+            int actionId;
+            int mapId;
+            uint sequence;
+            Assert(TianshuMapTeleportProtocol.TryParseMapAction(select, out actionId, out mapId, out sequence),
+                "map-select parser");
+            AssertEqual(TianshuMapTeleportProtocol.SelectMapAction, actionId, "map-select action id");
+            AssertEqual(86, mapId, "map-select map id");
+            AssertEqual(0x20U, sequence, "map-select live sequence");
+            Assert(TianshuMapTeleportProtocol.TryParseMapAction(execute, out actionId, out mapId, out sequence),
+                "map-teleport parser");
+            AssertEqual(TianshuMapTeleportProtocol.ExecuteTeleportAction, actionId, "map-teleport action id");
+            AssertEqual(86, mapId, "map-teleport map id");
+            AssertEqual(0x21U, sequence, "map-teleport live sequence");
+
+            byte[] activateFlight = HexCodec.Parse(
+                "00 18 00 2E 00 00 03 24 00 00 01 22 00 00 00 00 00 00 00 00 00 00 00 07");
+            byte[] fly = HexCodec.Parse(
+                "00 18 00 2E 00 00 00 A9 00 00 00 00 00 00 00 15 00 00 00 23 00 00 00 09");
+            AssertEqual(HexCodec.Format(activateFlight),
+                HexCodec.Format(TianshuMapTeleportProtocol.BuildActivateFlight(7)),
+                "captured flight-list action reconstructed");
+            AssertEqual(HexCodec.Format(fly),
+                HexCodec.Format(TianshuMapTeleportProtocol.BuildFlyToCoordinate(21, 35, 9)),
+                "captured coordinate-flight action reconstructed");
+            int flightX;
+            int flightY;
+            Assert(TianshuMapTeleportProtocol.TryParseFlightAction(fly, out actionId, out flightX, out flightY,
+                out sequence), "coordinate-flight parser");
+            AssertEqual(TianshuMapTeleportProtocol.FlyToCoordinateAction, actionId, "coordinate-flight action id");
+            AssertEqual(21, flightX, "coordinate-flight x");
+            AssertEqual(35, flightY, "coordinate-flight y");
+            AssertEqual(9U, sequence, "coordinate-flight sequence");
+
+            AssertEqual(42, TianshuMapTeleportCatalog.All.Count, "recorded destination count");
+            AssertEqual(42, TianshuMapTeleportCatalog.All.Select(item => item.MapId).Distinct().Count(),
+                "destination ids are unique");
+            AssertEqual(42, TianshuMapTeleportCatalog.All.Select(item => item.MapName).Distinct().Count(),
+                "destination names are unique");
+            MapTeleportDestination destination;
+            Assert(TianshuMapTeleportCatalog.TryGet(86, out destination) && destination.MapName == "三界关",
+                "destination lookup by id");
+            AssertEqual(575, destination.TotemNpcId, "recorded Sanjie Pass totem npc id");
+            AssertEqual((ushort)33, destination.TotemX, "recorded Sanjie Pass totem x");
+            AssertEqual((ushort)65, destination.TotemY, "recorded Sanjie Pass totem y");
+            Assert(TianshuMapTeleportCatalog.TryGet("灵昌城", out destination) && destination.MapId == 12,
+                "destination lookup by name");
+            Assert(TianshuMapTeleportCatalog.TryGet(" 102 ", out destination) && destination.MapName == "逐浪广场",
+                "destination lookup by numeric text");
+            Assert(!TianshuMapTeleportCatalog.TryGet(999999, out destination),
+                "unrecorded destination is rejected");
+            AssertThrows(delegate { TianshuMapTeleportProtocol.BuildMapAction(999, 86, 1); },
+                "unrecorded UI action is rejected");
+            AssertThrows(delegate { TianshuMapTeleportProtocol.BuildSelectMap(999999, 1); },
+                "unrecorded map id is rejected by packet builder");
+            AssertThrows(delegate { TianshuMapTeleportProtocol.BuildFlyToCoordinate(-1, 1, 1); },
+                "negative flight coordinate is rejected");
+
+            BountyTravelTarget totem = TianshuMapTeleportCatalog.GetTotemTravelTarget(69);
+            AssertEqual(558, totem.NpcId, "recorded Zhaofeng Terrace totem npc id");
+            AssertEqual("00 1B 00 B5 00 00 00 FE 00 03 35 35 38 00 02 36 39 00 04 35 3D 32 34 00 00 00 05",
+                HexCodec.Format(TianshuBountyProtocol.BuildTravelRequest(totem, 5)),
+                "legacy task-link packet to recorded totem");
+        }
+
+        private static void TestRecordedMapTeleport(string path)
+        {
+            Assert(File.Exists(path), "recorded map-teleport database exists");
+            int selectedMapId = 0;
+            int pendingMapId = 0;
+            int pairedRequests = 0;
+            int confirmedArrivals = 0;
+            int periodicFrames = 0;
+            HashSet<int> requestedMaps = new HashSet<int>();
+            HashSet<int> arrivedMaps = new HashSet<int>();
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText =
+                        "SELECT f.direction,f.opcode,f.bytes FROM frames f " +
+                        "INNER JOIN operation_frames ofr ON ofr.frame_id=f.id " +
+                        "WHERE ofr.run_id=(SELECT id FROM operation_runs ORDER BY started_utc DESC LIMIT 1) " +
+                        "ORDER BY f.capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ClientToServer && opcode == 0x0042)
+                            {
+                                periodicFrames++;
+                                continue;
+                            }
+                            if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuMapTeleportProtocol.ClientUiAction)
+                            {
+                                int actionId;
+                                int mapId;
+                                uint sequence;
+                                if (!TianshuMapTeleportProtocol.TryParseMapAction(bytes, out actionId, out mapId, out sequence))
+                                    continue;
+                                Assert(TianshuMapTeleportCatalog.All.Any(item => item.MapId == mapId),
+                                    "recording request map exists in catalog: " + mapId);
+                                if (actionId == TianshuMapTeleportProtocol.SelectMapAction)
+                                {
+                                    selectedMapId = mapId;
+                                    AssertEqual(HexCodec.Format(bytes),
+                                        HexCodec.Format(TianshuMapTeleportProtocol.BuildSelectMap(mapId, sequence)),
+                                        "recorded select action reconstructed for map " + mapId);
+                                }
+                                else
+                                {
+                                    AssertEqual(selectedMapId, mapId,
+                                        "execute action follows select action for the same map");
+                                    AssertEqual(HexCodec.Format(bytes),
+                                        HexCodec.Format(TianshuMapTeleportProtocol.BuildTeleportToMap(mapId, sequence)),
+                                        "recorded execute action reconstructed for map " + mapId);
+                                    pairedRequests++;
+                                    pendingMapId = mapId;
+                                    requestedMaps.Add(mapId);
+                                    selectedMapId = 0;
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuMapTeleportProtocol.ServerMapInfo)
+                            {
+                                RunLoopMapInfo map;
+                                if (!TianshuRunLoopProtocol.TryParseMapInfo(bytes, out map) || map.MapId != pendingMapId)
+                                    continue;
+                                MapTeleportDestination destination;
+                                Assert(TianshuMapTeleportCatalog.TryGet(map.MapId, out destination),
+                                    "arrival map exists in catalog: " + map.MapId);
+                                AssertEqual(destination.MapName, map.MapName,
+                                    "arrival map name matches catalog for map " + map.MapId);
+                                AssertEqual(destination.SpawnX, map.ScaledX,
+                                    "arrival X matches recording catalog for map " + map.MapId);
+                                AssertEqual(destination.SpawnY, map.ScaledY,
+                                    "arrival Y matches recording catalog for map " + map.MapId);
+                                confirmedArrivals++;
+                                arrivedMaps.Add(map.MapId);
+                                pendingMapId = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            AssertEqual(42, pairedRequests, "all 42 recorded select/execute request pairs parsed");
+            AssertEqual(42, confirmedArrivals, "all 42 requests have matching SC_MAP_INFO arrivals");
+            AssertEqual(42, requestedMaps.Count, "all recorded requests target distinct catalog maps");
+            AssertEqual(42, arrivedMaps.Count, "all catalog maps have a confirmed arrival");
+            Assert(periodicFrames > 0, "recording contains unrelated periodic 0x0042 frames that are excluded");
+            AssertEqual(0, selectedMapId, "no incomplete select request remains");
+            AssertEqual(0, pendingMapId, "no unconfirmed teleport request remains");
+        }
+
+        private static void TestClientLogging(string root)
+        {
+            ClientLogHub concurrentHub = new ClientLogHub(10000);
+            int publishedEvents = 0;
+            int clearedEvents = 0;
+            concurrentHub.EntryPublished += delegate { Interlocked.Increment(ref publishedEvents); };
+            concurrentHub.EntriesCleared += delegate { Interlocked.Increment(ref clearedEvents); };
+            Thread[] writers = new Thread[4];
+            for (int writerIndex = 0; writerIndex < writers.Length; writerIndex++)
+            {
+                int capturedWriter = writerIndex;
+                writers[writerIndex] = new Thread(new ThreadStart(delegate
+                {
+                    for (int i = 0; i < 3000; i++)
+                        concurrentHub.Publish("模块" + capturedWriter, ClientLogLevel.Info, "Running", "消息 " + i);
+                }));
+                writers[writerIndex].Start();
+            }
+            for (int i = 0; i < writers.Length; i++) writers[i].Join();
+
+            IList<ClientLogEntry> concurrentSnapshot = concurrentHub.Snapshot();
+            AssertEqual(10000, concurrentHub.Count, "unified log enforces configured capacity");
+            AssertEqual(10000, concurrentSnapshot.Count, "unified log snapshot is bounded");
+            AssertEqual(12000, publishedEvents, "all concurrent publications raise notifications");
+            AssertEqual(2001L, concurrentSnapshot[0].Sequence, "oldest entries are evicted first");
+            AssertEqual(12000L, concurrentSnapshot[concurrentSnapshot.Count - 1].Sequence, "latest entry is retained");
+            for (int i = 1; i < concurrentSnapshot.Count; i++)
+                Assert(concurrentSnapshot[i - 1].Sequence < concurrentSnapshot[i].Sequence,
+                    "concurrent log snapshot remains sequence ordered");
+            Assert(concurrentSnapshot.All(item => item.TimestampUtc.Kind == DateTimeKind.Utc),
+                "unified log stores UTC timestamps");
+            concurrentHub.Clear();
+            AssertEqual(0, concurrentHub.Count, "manual clear removes in-memory unified logs");
+            AssertEqual(1, clearedEvents, "manual clear raises one notification");
+
+            ClientLogHub isolatedHub = new ClientLogHub(2);
+            isolatedHub.EntryPublished += delegate { throw new InvalidOperationException("listener failure"); };
+            isolatedHub.Publish("测试", ClientLogLevel.Info, "Ready", "日志订阅者异常不得影响业务线程");
+            AssertEqual(1, isolatedHub.Count, "failing log listener is isolated from publishers");
+
+            ClientLogHub uiHub = new ClientLogHub();
+            using (ClientLogControl logControl = new ClientLogControl(uiHub))
+            {
+                logControl.Size = new System.Drawing.Size(850, 220);
+                logControl.CreateControl();
+                uiHub.Publish("自动除暴", ClientLogLevel.Info, "Running", "准备访问目标 NPC");
+                uiHub.Publish("地图传送", ClientLogLevel.Warning, "Stopped", "用户停止传送");
+                uiHub.Publish("自动登录", ClientLogLevel.Error, "Failed", "登录阶段失败，未记录密码");
+                logControl.RefreshEntries();
+
+                DataGridView grid = (DataGridView)typeof(ClientLogControl).GetField(
+                    "logGrid", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(logControl);
+                ToolStripComboBox moduleFilter = (ToolStripComboBox)typeof(ClientLogControl).GetField(
+                    "moduleFilter", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(logControl);
+                ToolStripComboBox levelFilter = (ToolStripComboBox)typeof(ClientLogControl).GetField(
+                    "levelFilter", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(logControl);
+                ToolStripTextBox keywordFilter = (ToolStripTextBox)typeof(ClientLogControl).GetField(
+                    "keywordFilter", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(logControl);
+                AssertEqual(3, grid.RowCount, "unified log grid renders all entries");
+                Assert(grid.VirtualMode, "unified log grid uses virtual rows");
+                Assert(grid.MultiSelect, "unified log grid supports multi-selection");
+                Assert(grid.ContextMenuStrip.Items.Cast<ToolStripItem>().Any(item => item.Text == "复制选中日志"),
+                    "unified log context menu supports selected-row copy");
+                Assert(grid.ContextMenuStrip.Items.Cast<ToolStripItem>().Any(item => item.Text == "清空统一日志（仅界面）"),
+                    "unified log context menu exposes memory-only clear");
+
+                moduleFilter.SelectedItem = "地图传送";
+                logControl.RefreshEntries();
+                AssertEqual(1, grid.RowCount, "module filter limits visible entries");
+                moduleFilter.SelectedItem = "全部模块";
+                levelFilter.SelectedItem = "错误";
+                logControl.RefreshEntries();
+                AssertEqual(1, grid.RowCount, "level filter limits visible entries");
+                levelFilter.SelectedItem = "全部级别";
+                keywordFilter.Text = "NPC";
+                logControl.RefreshEntries();
+                AssertEqual(1, grid.RowCount, "keyword filter searches module, state and message");
+                grid.Rows[0].Selected = true;
+                MethodInfo buildSelectedText = typeof(ClientLogControl).GetMethod(
+                    "BuildSelectedText", BindingFlags.Instance | BindingFlags.NonPublic);
+                string copied = (string)buildSelectedText.Invoke(logControl, null);
+                Assert(copied.Contains("自动除暴") && copied.Contains("目标 NPC"),
+                    "selected log copy contains structured row data");
+                Assert(!copied.Contains("password=") && !copied.Contains("ticket="),
+                    "copied login-facing log does not expose credential fields");
+                uiHub.Clear();
+                logControl.RefreshEntries();
+                AssertEqual(0, grid.RowCount, "GUI refresh reflects manual log clear");
+            }
+
+            string testRoot = Path.Combine(root, "unified-log-workbench");
+            Directory.CreateDirectory(testRoot);
+            string profilePath = Path.Combine(testRoot, "profile.json");
+            File.WriteAllText(Path.Combine(testRoot, "protocol.json"),
+                JsonConvert.SerializeObject(CreateLengthPrefixDefinition()));
+            File.WriteAllText(Path.Combine(testRoot, "rules.json"),
+                JsonConvert.SerializeObject(new RuleSetDocument { Rules = new List<PacketRule>() }));
+            File.WriteAllText(Path.Combine(testRoot, "packet.lua"),
+                "function on_frame(ctx) return nil end\nfunction main(api) return true end\n");
+            File.WriteAllText(profilePath, JsonConvert.SerializeObject(new
+            {
+                name = "unified-log-test",
+                gameUrl = "about:blank",
+                activeMode = false,
+                captureDirectory = "sessions",
+                protocolPath = "protocol.json",
+                rulesPath = "rules.json",
+                packetScriptPath = "packet.lua",
+                operationsPath = "operations.json",
+                proxyPorts = new int[0],
+                policyPorts = new int[0],
+                scriptTimeoutMs = 50,
+                captureQueueCapacity = 1024
+            }));
+
+            ProtocolWorkbenchService service = null;
+            ProtocolWorkbenchControl workbench = null;
+            BountyAutomationCoordinator bounty = null;
+            DonationAutomationCoordinator donation = null;
+            RunLoopAutomationCoordinator runLoop = null;
+            MountainClimbAutomationCoordinator mountain = null;
+            MapTeleportAutomationCoordinator mapTeleport = null;
+            ClientLogHub integrationHub = new ClientLogHub();
+            try
+            {
+                service = new ProtocolWorkbenchService(WorkbenchProfile.Load(profilePath, testRoot));
+                bounty = new BountyAutomationCoordinator(service);
+                donation = new DonationAutomationCoordinator(service);
+                runLoop = new RunLoopAutomationCoordinator(service);
+                mountain = new MountainClimbAutomationCoordinator(service);
+                mapTeleport = new MapTeleportAutomationCoordinator(service);
+                workbench = new ProtocolWorkbenchControl(service, null, null, bounty, donation, runLoop, mountain,
+                    mapTeleport, null, integrationHub);
+                workbench.Size = new System.Drawing.Size(1000, 700);
+                workbench.CreateControl();
+                workbench.PerformLayout();
+                TabControl featureTabs = (TabControl)typeof(ProtocolWorkbenchControl).GetField(
+                    "featureTabs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(workbench);
+                TabControl captureTabs = (TabControl)typeof(ProtocolWorkbenchControl).GetField(
+                    "captureTabs", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(workbench);
+                Assert(featureTabs.Multiline, "feature navigation allows multiple rows");
+                AssertEqual(2, featureTabs.RowCount, "feature navigation uses two rows at the workbench test width");
+                Assert(featureTabs.TabPages.Cast<TabPage>().Any(item => item.Text == "抓包"),
+                    "capture feature has a top-level entry");
+                Assert(!featureTabs.TabPages.Cast<TabPage>().Any(item => item.Text == "数据包" ||
+                    item.Text == "连接" || item.Text == "协议/字段"),
+                    "capture detail pages are not mixed with top-level features");
+                AssertEqual("数据包,连接,协议/字段",
+                    string.Join(",", captureTabs.TabPages.Cast<TabPage>().Select(item => item.Text).ToArray()),
+                    "capture entry contains the three requested subpages");
+                IList<Button> workbenchButtons = FindControls<Button>(workbench).ToList();
+                Assert(workbenchButtons.Any(item => item.Text == "传送点直传"), "direct map-teleport GUI action exists");
+                Assert(workbenchButtons.Any(item => item.Text == "旧链接瞬移到图腾"), "legacy totem GUI action exists");
+                Assert(workbenchButtons.Any(item => item.Text == "飞行到坐标"), "coordinate-flight GUI action exists");
+                Assert(FindControls<NumericUpDown>(workbench).Count() >= 2, "coordinate-flight GUI inputs exist");
+
+                bounty.Start(1, false, false);
+                bounty.Stop();
+                donation.Start(TianshuDonationProtocol.DefaultDonationNpcId, 1);
+                donation.Stop();
+                runLoop.Start(1, true);
+                runLoop.Stop();
+                mountain.Start();
+                mountain.Stop();
+                mapTeleport.TeleportTo(TianshuMapTeleportCatalog.All[0].MapId);
+                mapTeleport.Stop();
+
+                IList<ClientLogEntry> integrationEntries = integrationHub.Snapshot();
+                string[] expectedModules = { "自动除暴", "自动捐献", "自动跑环", "登山爬塔", "地图传送" };
+                for (int i = 0; i < expectedModules.Length; i++)
+                    Assert(integrationEntries.Any(item => item.Module == expectedModules[i]),
+                        expectedModules[i] + " status is bridged to the unified log");
+                Assert(integrationEntries.Any(item => item.Level == ClientLogLevel.Warning && item.State == "Stopped"),
+                    "stopped automation is classified as a warning");
+
+                MethodInfo loginStatus = typeof(ProtocolWorkbenchControl).GetMethod(
+                    "OnLoginAutomationStatusChanged", BindingFlags.Instance | BindingFlags.NonPublic);
+                loginStatus.Invoke(workbench, new object[] { LoginAutomationState.Failed, "登录失败且未回显凭据。" });
+                Assert(integrationHub.Snapshot().Any(item => item.Module == "自动登录" &&
+                    item.Level == ClientLogLevel.Error && item.State == "Failed"),
+                    "failed login status is classified as an error");
+                MethodInfo audioStatus = typeof(ProtocolWorkbenchControl).GetMethod(
+                    "OnAudioFilterStatusChanged", BindingFlags.Instance | BindingFlags.NonPublic);
+                audioStatus.Invoke(workbench, new object[] { "BGM 状态已更新。" });
+                Assert(integrationHub.Snapshot().Any(item => item.Module == "BGM"),
+                    "BGM status is bridged to the unified log");
+
+                SplitContainer logSplit = (SplitContainer)typeof(ProtocolWorkbenchControl).GetField(
+                    "logSplitContainer", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(workbench);
+                ToolStripButton logButton = (ToolStripButton)typeof(ProtocolWorkbenchControl).GetField(
+                    "logPaneButton", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(workbench);
+                Assert(!logSplit.Panel2Collapsed && logSplit.Panel2.Controls.OfType<ClientLogControl>().Any(),
+                    "unified log is fixed in the lower workbench pane");
+                logButton.PerformClick();
+                Assert(logSplit.Panel2Collapsed, "toolbar log button collapses the fixed pane");
+                logButton.PerformClick();
+                Assert(!logSplit.Panel2Collapsed, "toolbar log button restores the fixed pane");
+
+                RichTextBox auditLog = (RichTextBox)typeof(ProtocolWorkbenchControl).GetField(
+                    "eventLog", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(workbench);
+                service.ReportEngineEvent("TestAudit", "INFO", "audit remains independent", null);
+                Assert(auditLog.Text.Contains("audit remains independent"), "audit tab remains available");
+                integrationHub.Clear();
+                Assert(auditLog.Text.Contains("audit remains independent"),
+                    "clearing unified logs does not clear the audit tab");
+
+                Type[] removedLogControls =
+                {
+                    typeof(BountyAutomationControl), typeof(DonationAutomationControl), typeof(RunLoopAutomationControl),
+                    typeof(MountainClimbAutomationControl), typeof(MapTeleportAutomationControl)
+                };
+                foreach (Type controlType in removedLogControls)
+                {
+                    Control feature = FindControl(workbench, controlType);
+                    Assert(feature != null, controlType.Name + " remains present");
+                    Assert(!FindControls<TextBoxBase>(feature).Any(item => item.Multiline && item.ReadOnly),
+                        controlType.Name + " no longer owns a duplicate multiline log box");
+                }
+            }
+            finally
+            {
+                if (workbench != null) workbench.Dispose();
+                if (bounty != null) bounty.Dispose();
+                if (donation != null) donation.Dispose();
+                if (runLoop != null) runLoop.Dispose();
+                if (mountain != null) mountain.Dispose();
+                if (mapTeleport != null) mapTeleport.Dispose();
+                if (service != null) service.Dispose();
+            }
+        }
+
+        private static Control FindControl(Control root, Type type)
+        {
+            if (root == null || type == null) return null;
+            if (type.IsInstanceOfType(root)) return root;
+            foreach (Control child in root.Controls)
+            {
+                Control found = FindControl(child, type);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static IEnumerable<TControl> FindControls<TControl>(Control root) where TControl : Control
+        {
+            if (root == null) yield break;
+            TControl current = root as TControl;
+            if (current != null) yield return current;
+            foreach (Control child in root.Controls)
+                foreach (TControl descendant in FindControls<TControl>(child))
+                    yield return descendant;
+        }
+
+        private static void TestPacketGridInteractions(string root)
+        {
+            string testRoot = Path.Combine(root, "packet-grid");
+            Directory.CreateDirectory(testRoot);
+            string profilePath = Path.Combine(testRoot, "profile.json");
+            File.WriteAllText(Path.Combine(testRoot, "protocol.json"),
+                JsonConvert.SerializeObject(CreateLengthPrefixDefinition()));
+            File.WriteAllText(Path.Combine(testRoot, "rules.json"),
+                JsonConvert.SerializeObject(new RuleSetDocument { Rules = new List<PacketRule>() }));
+            File.WriteAllText(Path.Combine(testRoot, "packet.lua"),
+                "function on_frame(ctx) return nil end\nfunction main(api) return true end\n");
+            File.WriteAllText(profilePath, JsonConvert.SerializeObject(new
+            {
+                name = "packet-grid-test",
+                gameUrl = "about:blank",
+                activeMode = false,
+                captureDirectory = "sessions",
+                protocolPath = "protocol.json",
+                rulesPath = "rules.json",
+                packetScriptPath = "packet.lua",
+                operationsPath = "operations.json",
+                proxyPorts = new int[0],
+                policyPorts = new int[0],
+                scriptTimeoutMs = 50,
+                captureQueueCapacity = 1024
+            }));
+
+            string databasePath = null;
+            ProtocolWorkbenchService service = null;
+            ProtocolWorkbenchControl control = null;
+            try
+            {
+                service = new ProtocolWorkbenchService(WorkbenchProfile.Load(profilePath, testRoot));
+                databasePath = service.DatabasePath;
+                control = new ProtocolWorkbenchControl(service);
+                control.CreateControl();
+                FieldInfo packetGridField = typeof(ProtocolWorkbenchControl).GetField(
+                    "packetGrid", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert(packetGridField != null, "packet grid field exists");
+                DataGridView packetGrid = (DataGridView)packetGridField.GetValue(control);
+                Assert(packetGrid.MultiSelect, "packet grid enables Ctrl and Shift multi-selection");
+                AssertEqual(DataGridViewSelectionMode.FullRowSelect, packetGrid.SelectionMode,
+                    "packet grid selects complete rows");
+                Assert(packetGrid.ContextMenuStrip != null, "packet grid has a context menu");
+                string[] menuNames = packetGrid.ContextMenuStrip.Items.Cast<ToolStripItem>()
+                    .Where(item => !(item is ToolStripSeparator)).Select(item => item.Text).ToArray();
+                Assert(menuNames.Contains("复制选中行"), "packet menu restores selected-row copy");
+                Assert(menuNames.Contains("复制有效数据 Hex"), "packet menu copies effective hex");
+                Assert(menuNames.Contains("复制原始数据 Hex"), "packet menu copies original hex");
+                Assert(menuNames.Contains("清空选中数据包（仅界面）"), "packet menu clears selected rows");
+                Assert(menuNames.Contains("清空全部显示缓存（保留 SQLite）"), "packet menu clears all UI cache");
+
+                for (int i = 0; i < 3; i++)
+                {
+                    service.RecordChunk(new TransportChunk
+                    {
+                        ConnectionId = 0,
+                        TimestampUtc = DateTime.UtcNow.AddMilliseconds(i),
+                        Direction = TrafficDirection.ClientToServer,
+                        Operation = TransportOperation.Send,
+                        OriginalBytes = new byte[] { 0, 6, 1, 0, (byte)i, 1 },
+                        EffectiveBytes = new byte[] { 0, 6, 1, 0, (byte)i, 2 },
+                        RuleAction = RuleAction.Pass,
+                        NativeResult = 6
+                    });
+                }
+                AssertEqual(3, packetGrid.RowCount, "packet grid receives test rows");
+
+                packetGrid.ClearSelection();
+                packetGrid.Rows[0].Selected = true;
+                packetGrid.Rows[2].Selected = true;
+                MethodInfo rightClickHandler = typeof(ProtocolWorkbenchControl).GetMethod(
+                    "OnPacketCellMouseDown", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert(rightClickHandler != null, "packet right-click handler exists");
+                rightClickHandler.Invoke(control, new object[]
+                {
+                    packetGrid,
+                    new DataGridViewCellMouseEventArgs(0, 0, 1, 1,
+                        new MouseEventArgs(MouseButtons.Right, 1, 1, 1, 0))
+                });
+                Assert(packetGrid.Rows[0].Selected && packetGrid.Rows[2].Selected,
+                    "right-click preserves an existing multi-selection");
+
+                ToolStripItem clearSelected = packetGrid.ContextMenuStrip.Items.Cast<ToolStripItem>()
+                    .First(item => item.Text == "清空选中数据包（仅界面）");
+                clearSelected.PerformClick();
+                AssertEqual(1, packetGrid.RowCount, "clear-selected removes only selected UI rows");
+
+                ToolStripItem clearAll = packetGrid.ContextMenuStrip.Items.Cast<ToolStripItem>()
+                    .First(item => item.Text == "清空全部显示缓存（保留 SQLite）");
+                clearAll.PerformClick();
+                AssertEqual(0, packetGrid.RowCount, "clear-all removes remaining UI rows");
+            }
+            finally
+            {
+                if (control != null) control.Dispose();
+                if (service != null) service.Dispose();
+            }
+
+            using (SQLiteConnection connection = new SQLiteConnection(
+                "Data Source=" + databasePath + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT COUNT(*) FROM chunks;";
+                    AssertEqual(3, Convert.ToInt32(command.ExecuteScalar()),
+                        "packet UI clear actions preserve all SQLite chunks");
+                }
+            }
+        }
+
+        private static void TestRecordedMountainClimb(string path)
+        {
+            Assert(File.Exists(path), "recorded mountain-climb database exists");
+            int acceptActions = 0;
+            int turnInActions = 0;
+            int taskRemovals = 0;
+            int rainFootsteps = 0;
+            int slopeFootsteps = 0;
+            int creekFootsteps = 0;
+            HashSet<int> arrivedMaps = new HashSet<int>();
+            HashSet<int> portalNpcIds = new HashSet<int>();
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuMountainClimbProtocol.ClientQuestAction)
+                            {
+                                int npcId;
+                                string functionId;
+                                bool turnIn;
+                                uint sequence;
+                                Assert(TianshuMountainClimbProtocol.TryParseQuestAction(bytes, out npcId, out functionId,
+                                    out turnIn, out sequence), "recorded mountain quest action parses");
+                                AssertEqual(HexCodec.Format(bytes), HexCodec.Format(TianshuMountainClimbProtocol.BuildQuestAction(
+                                    npcId, functionId, turnIn, sequence)), "recorded mountain quest action reconstructed");
+                                if (turnIn) turnInActions++; else acceptActions++;
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuRunLoopProtocol.ClientMovement)
+                            {
+                                long timestamp;
+                                int mapId;
+                                ushort x;
+                                ushort y;
+                                if (!TianshuRunLoopProtocol.TryParseMovement(bytes, out timestamp, out mapId, out x, out y)) continue;
+                                if (mapId == 18) rainFootsteps++;
+                                else if (mapId == 19) slopeFootsteps++;
+                                else if (mapId == 20) creekFootsteps++;
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuBountyProtocol.ClientNpcOpen && bytes.Length == 12)
+                            {
+                                portalNpcIds.Add((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]);
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuRunLoopProtocol.ServerMapInfo)
+                            {
+                                RunLoopMapInfo map;
+                                if (TianshuRunLoopProtocol.TryParseMapInfo(bytes, out map)) arrivedMaps.Add(map.MapId);
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuMountainClimbProtocol.ServerTaskRemoved &&
+                                (TianshuMountainClimbProtocol.IsTaskRemoved(bytes, TianshuMountainClimbProtocol.BraveTowerTaskId) ||
+                                TianshuMountainClimbProtocol.IsTaskRemoved(bytes, TianshuMountainClimbProtocol.FirstTowerTaskId) ||
+                                TianshuMountainClimbProtocol.IsTaskRemoved(bytes, TianshuMountainClimbProtocol.RainMountainTaskId)))
+                            {
+                                taskRemovals++;
+                            }
+                        }
+                    }
+                }
+            }
+            AssertEqual(3, acceptActions, "recording accepts all three mountain tasks");
+            Assert(turnInActions >= 3, "recording turns in all three mountain tasks");
+            AssertEqual(3, taskRemovals, "server removes all three completed tasks");
+            Assert(rainFootsteps >= 25 && slopeFootsteps >= 25 && creekFootsteps >= 10,
+                "recording contains verified rain-mountain walking paths");
+            foreach (int mapId in new[] { 13, 25, 30, 55, 65, 18, 19, 20 })
+                Assert(arrivedMaps.Contains(mapId), "recording reaches required map " + mapId);
+            foreach (int npcId in new[] { 14, 196, 101, 110, 71, 75, 111, 112, 113, 214, 246, 247 })
+                Assert(portalNpcIds.Contains(npcId), "recording contains portal/NPC " + npcId);
+        }
+
+        private static void TestRecordedMountainShortcut(string path)
+        {
+            Assert(File.Exists(path), "recorded mountain shortcut database exists");
+            bool shortcutAdvertised = false;
+            bool shortcutRequested = false;
+            bool braveTowerTurnedIn = false;
+            bool braveTowerRemoved = false;
+            int firstMapAfterShortcut = -1;
+
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuBountyProtocol.ServerNpcDialog && bytes.Length >= 8 &&
+                                ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) ==
+                                    TianshuMountainClimbProtocol.TowerTeleporterNpcId &&
+                                TianshuBountyProtocol.ContainsText(bytes,
+                                    TianshuMountainClimbProtocol.BraveTowerDirectTeleportFunction))
+                            {
+                                shortcutAdvertised = true;
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuBountyProtocol.ClientNpcFunction && bytes.Length >= 8 &&
+                                ((bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7]) ==
+                                    TianshuMountainClimbProtocol.TowerTeleporterNpcId &&
+                                TianshuBountyProtocol.ContainsText(bytes,
+                                    TianshuMountainClimbProtocol.BraveTowerDirectTeleportFunction))
+                            {
+                                shortcutRequested = true;
+                            }
+                            else if (shortcutRequested && firstMapAfterShortcut < 0 &&
+                                direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuRunLoopProtocol.ServerMapInfo)
+                            {
+                                RunLoopMapInfo map;
+                                if (TianshuRunLoopProtocol.TryParseMapInfo(bytes, out map))
+                                    firstMapAfterShortcut = map.MapId;
+                            }
+                            else if (shortcutRequested && direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuMountainClimbProtocol.ClientQuestAction)
+                            {
+                                int npcId;
+                                string functionId;
+                                bool turnIn;
+                                uint requestSequence;
+                                if (TianshuMountainClimbProtocol.TryParseQuestAction(bytes, out npcId, out functionId,
+                                    out turnIn, out requestSequence) && npcId == 8075 && turnIn &&
+                                    functionId == TianshuMountainClimbProtocol.BraveTowerTurnInFunction)
+                                    braveTowerTurnedIn = true;
+                            }
+                            else if (shortcutRequested && direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuMountainClimbProtocol.ServerTaskRemoved &&
+                                TianshuMountainClimbProtocol.IsTaskRemoved(bytes,
+                                    TianshuMountainClimbProtocol.BraveTowerTaskId))
+                            {
+                                braveTowerRemoved = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            Assert(shortcutAdvertised, "tower teleporter advertises direct floor-ten function");
+            Assert(shortcutRequested, "recording selects direct floor-ten function");
+            AssertEqual(TianshuMountainClimbProtocol.BraveTowerDestinationMapId, firstMapAfterShortcut,
+                "direct teleport's first confirmed destination is brave-tower floor ten");
+            Assert(braveTowerTurnedIn, "recording turns in brave-tower task to explorer 8075 after shortcut");
+            Assert(braveTowerRemoved, "server confirms brave-tower task removal after shortcut");
+        }
+
+        private static byte[] BuildRunLoopTaskFrame(int ring, string description, string tracker)
+        {
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, (byte)TianshuRunLoopProtocol.ServerTaskUpdate }, 0, 4);
+                WriteUtf8String(stream, TianshuRunLoopProtocol.TaskId);
+                WriteUtf8String(stream, "跑环任务");
+                WriteUtf8String(stream, "跑环任务（第" + ring + "环）");
+                WriteUtf8String(stream, description);
+                WriteUtf8String(stream, tracker);
+                byte[] frame = stream.ToArray();
+                frame[0] = (byte)(frame.Length >> 8);
+                frame[1] = (byte)frame.Length;
+                return frame;
+            }
+        }
+
+        private static void TestRecordedRunLoop(string path)
+        {
+            Assert(File.Exists(path), "recorded run-loop database exists");
+            int parsedTasks = 0;
+            int deliveryTasks = 0;
+            int huntTasks = 0;
+            int movements = 0;
+            int recoveries = 0;
+            int acceptFunctions = 0;
+            int turnInFunctions = 0;
+            int learnedEntities = 0;
+            bool learnedJiangTian = false;
+            bool ringTwenty = false;
+            bool wrappedToOne = false;
+            int previousRing = 0;
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ClientToServer && opcode == TianshuRunLoopProtocol.ClientMovement)
+                            {
+                                long timestamp;
+                                int mapId;
+                                ushort x;
+                                ushort y;
+                                if (TianshuRunLoopProtocol.TryParseMovement(bytes, out timestamp, out mapId, out x, out y)) movements++;
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer && opcode == TianshuRunLoopProtocol.ClientUiAction &&
+                                TianshuRunLoopProtocol.TryParseOneKeyRecovery(bytes)) recoveries++;
+                            else if (direction == (int)TrafficDirection.ClientToServer && opcode == TianshuBountyProtocol.ClientNpcFunction)
+                            {
+                                string raw = Encoding.UTF8.GetString(bytes);
+                                if (raw.IndexOf(TianshuRunLoopProtocol.AcceptFunctionId, StringComparison.Ordinal) >= 0) acceptFunctions++;
+                                if (raw.IndexOf(TianshuRunLoopProtocol.TurnInFunctionId, StringComparison.Ordinal) >= 0) turnInFunctions++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuRunLoopProtocol.ServerTaskUpdate)
+                            {
+                                RunLoopTask task;
+                                if (!TianshuRunLoopProtocol.TryParseTask(bytes, out task)) continue;
+                                parsedTasks++;
+                                if (task.Kind == RunLoopTaskKind.DeliverItem) deliveryTasks++;
+                                if (task.Kind == RunLoopTaskKind.Hunt) huntTasks++;
+                                if (task.RingNumber == 20) ringTwenty = true;
+                                if (previousRing == 20 && task.RingNumber == 1) wrappedToOne = true;
+                                previousRing = task.RingNumber;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                (opcode == TianshuRunLoopProtocol.ServerEntityList || opcode == TianshuRunLoopProtocol.ServerNearbyEntities))
+                            {
+                                IList<RunLoopEntity> entities = TianshuRunLoopProtocol.ExtractEntities(bytes);
+                                learnedEntities += entities.Count;
+                                for (int i = 0; i < entities.Count; i++)
+                                    if (entities[i].Id == 93192 && entities[i].Name == "先锋护卫姜天") learnedJiangTian = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Assert(parsedTasks >= 8, "recording contains parsed run-loop task/progress updates");
+            Assert(deliveryTasks >= 2, "recording contains item-delivery rings");
+            Assert(huntTasks >= 5, "recording contains hunt progress updates");
+            Assert(movements >= 100, "recording contains encounter walking packets");
+            Assert(recoveries >= 4, "recording contains periodic one-key recovery packets");
+            Assert(acceptFunctions >= 1, "recording contains run-loop accept function");
+            Assert(turnInFunctions >= 3, "recording contains repeated turn-in function");
+            Assert(ringTwenty && wrappedToOne, "recording proves 20-ring round boundary");
+            Assert(learnedEntities >= 10 && learnedJiangTian, "runtime entity table learns NPC name/id mappings");
+        }
+
+        private static byte[] BuildInventoryUpdateFrame(ushort bag, ushort slot, ushort count, string name, string templateId)
+        {
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, 0x24 }, 0, 4);
+                stream.WriteByte((byte)(bag >> 8));
+                stream.WriteByte((byte)bag);
+                stream.WriteByte((byte)(slot >> 8));
+                stream.WriteByte((byte)slot);
+                stream.WriteByte((byte)(count >> 8));
+                stream.WriteByte((byte)count);
+                WriteUtf8String(stream, name);
+                WriteUtf8String(stream, templateId);
+                byte[] frame = stream.ToArray();
+                frame[0] = (byte)(frame.Length >> 8);
+                frame[1] = (byte)frame.Length;
+                return frame;
+            }
+        }
+
+        private static byte[] BuildInventorySnapshotFrame(ushort bag, ushort slot, ushort count)
+        {
+            byte[] name = Encoding.UTF8.GetBytes("上古神器碎片(一等)");
+            byte[] raw;
+            using (MemoryStream payload = new MemoryStream())
+            {
+                payload.Write(new byte[] { 0xAA, 0x55, 0, 0, 0 }, 0, 5);
+                payload.WriteByte((byte)(bag >> 8));
+                payload.WriteByte((byte)bag);
+                payload.WriteByte((byte)(slot >> 8));
+                payload.WriteByte((byte)slot);
+                payload.WriteByte((byte)(count >> 8));
+                payload.WriteByte((byte)count);
+                payload.WriteByte(0);
+                payload.WriteByte(0x77);
+                payload.WriteByte((byte)(name.Length >> 8));
+                payload.WriteByte((byte)name.Length);
+                payload.Write(name, 0, name.Length);
+                payload.WriteByte(0);
+                payload.WriteByte(0);
+                raw = payload.ToArray();
+            }
+            byte[] deflated;
+            using (MemoryStream compressed = new MemoryStream())
+            {
+                using (DeflateStream deflater = new DeflateStream(compressed, CompressionMode.Compress, true))
+                    deflater.Write(raw, 0, raw.Length);
+                deflated = compressed.ToArray();
+            }
+            int zlibLength = 2 + deflated.Length + 4;
+            byte[] frame = new byte[6 + zlibLength];
+            frame[0] = (byte)(frame.Length >> 8);
+            frame[1] = (byte)frame.Length;
+            frame[2] = (byte)(TianshuDonationProtocol.ServerInventorySnapshot >> 8);
+            frame[3] = (byte)TianshuDonationProtocol.ServerInventorySnapshot;
+            frame[4] = (byte)(zlibLength >> 8);
+            frame[5] = (byte)zlibLength;
+            frame[6] = 0x78;
+            frame[7] = 0x01;
+            Buffer.BlockCopy(deflated, 0, frame, 8, deflated.Length);
+            return frame;
+        }
+
         private static void TestRecordedBounty(string path)
         {
             Assert(File.Exists(path), "recorded bounty database exists");
@@ -216,6 +1276,194 @@ namespace TianshuQitanLauncher.Tests
             Assert(roundReward, "tenth-task round reward detected");
         }
 
+        private static void TestRecordedDonation(string path)
+        {
+            Assert(File.Exists(path), "recorded donation database exists");
+            int donationRequests = 0;
+            int successes = 0;
+            int panelReady = 0;
+            int targetUpdates = 0;
+            int sourceRemovals = 0;
+            int donationDialogs = 0;
+            HashSet<ushort> sourceSlots = new HashSet<ushort>();
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ClientToServer && opcode == TianshuDonationProtocol.ClientItemTransfer)
+                            {
+                                ushort slot;
+                                uint sequence;
+                                if (TianshuDonationProtocol.TryParseDonationRequest(bytes, out slot, out sequence))
+                                {
+                                    donationRequests++;
+                                    sourceSlots.Add(slot);
+                                    AssertEqual(HexCodec.Format(bytes),
+                                        HexCodec.Format(TianshuDonationProtocol.BuildDonateItem(slot, sequence)),
+                                        "recorded donation reconstructed without hard-coded slot/sequence");
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuBountyProtocol.ServerNpcDialog)
+                            {
+                                int npcId;
+                                string functionId;
+                                if (TianshuBountyProtocol.TryParseNpcFunction(bytes, TianshuDonationProtocol.DonationFunctionLabel,
+                                    out npcId, out functionId) && npcId == TianshuDonationProtocol.DefaultDonationNpcId) donationDialogs++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuDonationProtocol.ServerDonationPanel)
+                            {
+                                ushort panel;
+                                if (TianshuDonationProtocol.TryParsePanelReady(bytes, out panel) && panel == 3) panelReady++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuDonationProtocol.ServerItemUpdate)
+                            {
+                                DonationInventoryItem item;
+                                if (TianshuDonationProtocol.TryParseInventoryUpdate(bytes, out item) && item.IsTargetFragment &&
+                                    item.BagId == TianshuDonationProtocol.SourceBagId) targetUpdates++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuDonationProtocol.ServerItemRemove)
+                            {
+                                ushort bag;
+                                ushort slot;
+                                if (TianshuDonationProtocol.TryParseInventoryRemoval(bytes, out bag, out slot) &&
+                                    bag == TianshuDonationProtocol.SourceBagId) sourceRemovals++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient && opcode == TianshuBountyProtocol.ServerSystemMessage &&
+                                TianshuDonationProtocol.IsDonationSuccess(bytes)) successes++;
+                        }
+                    }
+                }
+            }
+            Assert(donationRequests >= 15, "recording contains the earlier full stack and marked donation samples");
+            Assert(successes >= 15, "every recorded donation has a server success message");
+            Assert(panelReady >= donationRequests, "panel-ready response precedes each donation");
+            Assert(donationDialogs >= donationRequests, "donation function is dynamically advertised for each visit");
+            Assert(targetUpdates >= donationRequests - 1, "source inventory updates expose item id/name and changing count");
+            Assert(sourceRemovals >= 1, "last source item is removed after stack exhaustion");
+            Assert(sourceSlots.Contains(0x7E) && sourceSlots.Contains(0x12), "recording proves source slot changes and must be queried dynamically");
+        }
+
+        private static void TestRecordedDonationConfirmation(string path)
+        {
+            Assert(File.Exists(path), "recorded donation-confirm database exists");
+            int stagedItems = 0;
+            int confirmations = 0;
+            int matchedSuccesses = 0;
+            bool transferPending = false;
+            bool stagedForConfirmation = false;
+            bool confirmationPending = false;
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuDonationProtocol.ClientItemTransfer)
+                            {
+                                ushort slot;
+                                uint sequence;
+                                if (TianshuDonationProtocol.TryParseDonationRequest(bytes, out slot, out sequence))
+                                {
+                                    transferPending = true;
+                                    stagedForConfirmation = false;
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuDonationProtocol.ServerItemUpdate)
+                            {
+                                DonationInventoryItem item;
+                                if (transferPending && TianshuDonationProtocol.TryParseInventoryUpdate(bytes, out item) &&
+                                    item.BagId == TianshuDonationProtocol.DonationContainerId && item.Slot == 0 &&
+                                    item.IsTargetFragment && item.Count > 0)
+                                {
+                                    stagedItems++;
+                                    stagedForConfirmation = true;
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuDonationProtocol.ClientUiAction)
+                            {
+                                uint sequence;
+                                if (TianshuDonationProtocol.TryParseDonationConfirm(bytes, out sequence))
+                                {
+                                    confirmations++;
+                                    AssertEqual(HexCodec.Format(bytes),
+                                        HexCodec.Format(TianshuDonationProtocol.BuildDonationConfirm(sequence)),
+                                        "recorded donation button reconstructed with live sequence");
+                                    if (stagedForConfirmation)
+                                    {
+                                        confirmationPending = true;
+                                        stagedForConfirmation = false;
+                                        transferPending = false;
+                                    }
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuBountyProtocol.ServerSystemMessage &&
+                                TianshuDonationProtocol.IsDonationSuccess(bytes) && confirmationPending)
+                            {
+                                matchedSuccesses++;
+                                confirmationPending = false;
+                            }
+                        }
+                    }
+                }
+            }
+            Assert(stagedItems >= 10, "recording contains repeated server-confirmed temporary-container updates");
+            Assert(confirmations >= 10, "recording contains repeated 0x03B9 donation-button actions");
+            Assert(matchedSuccesses >= 10, "donation success follows staging and 0x03B9 confirmation");
+        }
+
+        private static void TestRecordedInventorySnapshot(string path)
+        {
+            Assert(File.Exists(path), "recorded initial inventory database exists");
+            int snapshotFrames = 0;
+            DonationInventoryItem target = null;
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT bytes FROM frames WHERE direction=@direction AND opcode=@opcode ORDER BY capture_ordinal;";
+                    command.Parameters.AddWithValue("@direction", (int)TrafficDirection.ServerToClient);
+                    command.Parameters.AddWithValue("@opcode", TianshuDonationProtocol.ServerInventorySnapshot);
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            snapshotFrames++;
+                            IList<DonationInventoryItem> items;
+                            if (!TianshuDonationProtocol.TryParseInventorySnapshot((byte[])reader[0], out items)) continue;
+                            for (int i = 0; i < items.Count; i++)
+                                if (items[i].IsTargetFragment) target = items[i];
+                        }
+                    }
+                }
+            }
+            Assert(snapshotFrames >= 1, "login recording contains compressed initial inventory snapshot");
+            Assert(target != null, "target fragment found by name in initial inventory snapshot");
+            AssertEqual((ushort)1, target.BagId, "live snapshot target bag");
+            AssertEqual((ushort)13, target.Slot, "live snapshot target slot");
+            AssertEqual((ushort)730, target.Count, "live snapshot target count");
+        }
+
         private static byte[] BuildConfirmationFrame(uint contextId, string title, string content, string token)
         {
             using (MemoryStream stream = new MemoryStream())
@@ -246,6 +1494,26 @@ namespace TianshuQitanLauncher.Tests
                 stream.WriteByte(1);
                 WriteUtf8String(stream, "除暴安良");
                 WriteUtf8String(stream, "374");
+                byte[] frame = stream.ToArray();
+                frame[0] = (byte)(frame.Length >> 8);
+                frame[1] = (byte)frame.Length;
+                return frame;
+            }
+        }
+
+        private static byte[] BuildNpcDialogFrame(int npcId, string npcName, string label, string functionId)
+        {
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, (byte)TianshuBountyProtocol.ServerNpcDialog }, 0, 4);
+                WriteUInt32BigEndian(stream, (uint)npcId);
+                WriteUtf8String(stream, npcName);
+                WriteUtf8String(stream, "0");
+                WriteUtf8String(stream, "功能列表");
+                stream.WriteByte(0);
+                stream.WriteByte(1);
+                WriteUtf8String(stream, label);
+                WriteUtf8String(stream, functionId);
                 byte[] frame = stream.ToArray();
                 frame[0] = (byte)(frame.Length >> 8);
                 frame[1] = (byte)frame.Length;
@@ -1033,10 +2301,17 @@ PRAGMA user_version=1;";
 
             MultiAccountManager manager = new MultiAccountManager(
                 baseDirectory, Process.GetCurrentProcess().MainModule.FileName, profilePath, accounts, firstContext);
-            using (MultiAccountControl control = new MultiAccountControl(manager))
+            ClientLogHub multiAccountLog = new ClientLogHub();
+            using (MultiAccountControl control = new MultiAccountControl(manager, multiAccountLog))
             {
                 control.CreateControl();
                 Assert(control.Controls.Count > 0, "multi-account management UI is constructed");
+                Button newButton = FindControls<Button>(control).First(item => item.Text == "新建");
+                newButton.PerformClick();
+                Assert(multiAccountLog.Snapshot().Any(item => item.Module == "多开管理"),
+                    "multi-account UI status is published to the unified log");
+                Assert(!multiAccountLog.Snapshot().Any(item => item.Message.Contains("password-a") ||
+                    item.Message.Contains("password-b")), "multi-account logs contain no stored password");
             }
 
             string catalogJson = File.ReadAllText(Path.Combine(accounts.RootDirectory, "accounts.json"));

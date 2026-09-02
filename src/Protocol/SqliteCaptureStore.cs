@@ -492,6 +492,27 @@ namespace TianshuQitanLauncher.Protocol
 
         private static void MoveDatabaseFiles(string source, string target)
         {
+            Exception lastError = null;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    MoveDatabaseFilesOnce(source, target);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (!(ex is IOException) && !(ex is UnauthorizedAccessException)) throw;
+                    lastError = ex;
+                    SQLiteConnection.ClearAllPools();
+                    if (attempt < 4) Thread.Sleep(75 * (attempt + 1));
+                }
+            }
+            throw new IOException("多次重试后仍无法移动会话库文件。", lastError);
+        }
+
+        private static void MoveDatabaseFilesOnce(string source, string target)
+        {
             string[] suffixes = { string.Empty, "-wal", "-shm", "-journal" };
             for (int i = 0; i < suffixes.Length; i++)
             {
@@ -500,10 +521,37 @@ namespace TianshuQitanLauncher.Protocol
                 if (File.Exists(sourcePart) && File.Exists(targetPart))
                     throw new IOException("目标文件已经存在：" + Path.GetFileName(targetPart));
             }
-            for (int i = 0; i < suffixes.Length; i++)
+            List<string> movedSuffixes = new List<string>();
+            try
             {
-                string sourcePart = source + suffixes[i];
-                if (File.Exists(sourcePart)) File.Move(sourcePart, target + suffixes[i]);
+                for (int i = 0; i < suffixes.Length; i++)
+                {
+                    string sourcePart = source + suffixes[i];
+                    if (!File.Exists(sourcePart)) continue;
+                    File.Move(sourcePart, target + suffixes[i]);
+                    movedSuffixes.Add(suffixes[i]);
+                }
+            }
+            catch (Exception moveError)
+            {
+                Exception rollbackError = null;
+                for (int i = movedSuffixes.Count - 1; i >= 0; i--)
+                {
+                    string suffix = movedSuffixes[i];
+                    try
+                    {
+                        if (File.Exists(target + suffix) && !File.Exists(source + suffix))
+                            File.Move(target + suffix, source + suffix);
+                    }
+                    catch (Exception ex)
+                    {
+                        rollbackError = ex;
+                    }
+                }
+                if (rollbackError != null)
+                    throw new IOException("移动会话库失败，且回滚已移动的伴随文件时也失败。",
+                        new AggregateException(moveError, rollbackError));
+                throw;
             }
         }
 

@@ -18,7 +18,7 @@ byte body[frame_length - 4]
 
 1. 客户端连接入口服 `124.250.115.168:7800..7803`。
 2. `CS_USER_PASS (0x0000)`：`string username + string password`。样本确认密码在原始线协议中是明文 UTF-8。
-3. `SC_LOGIN_RESULT (0x0001)`：入口服确认登录，并返回登录随机值、时间、外网地址和结果字段。
+3. `SC_ACCOUNT_INFO (0x0001)`：入口服确认登录，正文为 `i32 passport_id + string server_time + string external_ip + i16 account_type + i16 passport_info`。旧版文档曾把最后 4 字节合称“结果字段”，本次结合原客户端处理函数后已校正。
 4. `SC_CLIENT_TOKEN (0x00C8)`：`string token`。字符串是 Base64；样本解码为 48 字节不透明票据。客户端不解释其中语义。
 5. `SC_GAMESERVER_LIST (0x00C9)`：`u32 count`，随后是 `count` 个线路记录：
 
@@ -33,9 +33,10 @@ byte body[frame_length - 4]
    样本包含一个“推荐线路”记录和一线、二线、三线、四线四个物理线路记录。不能假设推荐线路固定对应某一线，自动登录按显示名寻找目标物理线路。
 
 6. 客户端关闭入口连接，连接选中线路返回的 IP/端口。
-7. `CS_USER_TOKEN2 (0x0006)`：首个字符串与 `SC_CLIENT_TOKEN` 中的 Base64 文本逐字节相同；后面包含强制登录/运营标识和客户端校验字符串。
+7. `CS_USER_TOKEN2 (0x0006)`：首个字符串与 `SC_CLIENT_TOKEN` 中的 Base64 文本逐字节相同，随后为 `i32 force_login + i32 operation_com + string client_signature`。签名公式为 `md5(decimal(operation_com) + server_id + md5("tspk")) + " "`，结尾空格是协议的一部分。
 8. `SC_ROLE_INFO_LIST (0x000C)` 返回角色列表；随后 `CS_SELECT_ROLE (0x000A)` 选择角色。
 9. `SC_ROLE_INFO (0x0014)` 返回所选角色的完整资料并开始批量初始化；`SC_ROLE_START_POINT (0x0016)` 返回两个 `i16` 地图坐标，客户端在该处理函数中正式调用 `enterGame()`。
+10. 游戏服周期性发送 `SC_SERVER_PING (0x0053)`，客户端立即返回 `CS_CLIENT_PING (0x0042)`。初始化种子和 30 秒周期详见 [心跳协议](heartbeat-protocol.md)。
 
 ## 自动登录实现
 

@@ -445,6 +445,8 @@ namespace TianshuQitanLauncher.Protocol
 
     public sealed class BountyAutomationCoordinator : IDisposable
     {
+        private const string AutomationOwner = "AutoBounty";
+
         private enum TravelDestination
         {
             None = 0,
@@ -549,12 +551,19 @@ namespace TianshuQitanLauncher.Protocol
         public void Start(int roundCount, bool useWantedPoster, bool travelViaPalace)
         {
             if (roundCount < 1 || roundCount > 2) throw new ArgumentOutOfRangeException("roundCount");
+            string currentOwner;
+            if (!service.TryAcquireAutomation(AutomationOwner, out currentOwner))
+                throw new InvalidOperationException("当前已有自动化流程正在运行：" + currentOwner + "。请先停止后再启动自动除暴。");
             int currentGeneration;
             bool enableActive;
             bool canBegin;
             lock (syncRoot)
             {
-                if (disposed) throw new ObjectDisposedException(GetType().Name);
+                if (disposed)
+                {
+                    service.ReleaseAutomation(AutomationOwner);
+                    throw new ObjectDisposedException(GetType().Name);
+                }
                 generation++;
                 currentGeneration = generation;
                 DisposeTimerLocked();
@@ -604,6 +613,7 @@ namespace TianshuQitanLauncher.Protocol
             service.ConnectionChanged -= OnConnectionChanged;
             service.FrameCaptured -= OnFrameCaptured;
             service.ActiveModeChanged -= OnActiveModeChanged;
+            service.ReleaseAutomation(AutomationOwner);
             if (restoreActive && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1075,6 +1085,7 @@ namespace TianshuQitanLauncher.Protocol
             }
             Publish(expectedGeneration, BountyAutomationState.Completed,
                 "已完成并领取 " + rounds + " 轮除暴奖励（本次自动化处理 " + completed + " 环），自动流程结束。", false);
+            service.ReleaseAutomation(AutomationOwner);
             if (restoreActive && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1140,6 +1151,7 @@ namespace TianshuQitanLauncher.Protocol
                 activatedByAutomation = false;
             }
             PublishAny(BountyAutomationState.Failed, message, true);
+            service.ReleaseAutomation(AutomationOwner);
             if (restoreActive && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1157,6 +1169,7 @@ namespace TianshuQitanLauncher.Protocol
                 activatedByAutomation = false;
             }
             PublishAny(finalState, message, error);
+            service.ReleaseAutomation(AutomationOwner);
             if (restoreActive && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1256,7 +1269,6 @@ namespace TianshuQitanLauncher.Protocol
         private readonly Label stateLabel;
         private readonly Label progressLabel;
         private readonly Label targetLabel;
-        private readonly TextBox logBox;
         private readonly Button startButton;
         private readonly Button stopButton;
 
@@ -1270,14 +1282,13 @@ namespace TianshuQitanLauncher.Protocol
             layout.Dock = DockStyle.Fill;
             layout.Padding = new Padding(8);
             layout.ColumnCount = 1;
-            layout.RowCount = 7;
+            layout.RowCount = 6;
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             Label help = new Label();
             help.AutoSize = true;
@@ -1314,13 +1325,6 @@ namespace TianshuQitanLauncher.Protocol
             layout.Controls.Add(progressLabel, 0, 4);
             layout.Controls.Add(targetLabel, 0, 5);
 
-            logBox = new TextBox();
-            logBox.Dock = DockStyle.Fill;
-            logBox.Multiline = true;
-            logBox.ReadOnly = true;
-            logBox.ScrollBars = ScrollBars.Both;
-            logBox.Font = new Font(FontFamily.GenericMonospace, 8.5f);
-            layout.Controls.Add(logBox, 0, 6);
             Controls.Add(layout);
             coordinator.StatusChanged += OnStatusChanged;
         }
@@ -1333,7 +1337,14 @@ namespace TianshuQitanLauncher.Protocol
 
         private void OnStartClick(object sender, EventArgs e)
         {
-            coordinator.Start((int)taskCount.Value, useWantedPoster.Checked, viaPalace.Checked);
+            try
+            {
+                coordinator.Start((int)taskCount.Value, useWantedPoster.Checked, viaPalace.Checked);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "无法启动自动除暴", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void OnStatusChanged(BountyAutomationState automationState, string message)
@@ -1356,7 +1367,6 @@ namespace TianshuQitanLauncher.Protocol
             targetLabel.Text = "当前目标：" + (target == null ? "尚未解析" : target.ToString());
             startButton.Enabled = !running;
             stopButton.Enabled = running;
-            logBox.AppendText(DateTime.Now.ToString("HH:mm:ss.fff") + " [" + automationState + "] " + message + Environment.NewLine);
         }
     }
 }

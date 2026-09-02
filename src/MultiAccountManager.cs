@@ -534,6 +534,7 @@ namespace TianshuQitanLauncher
     public sealed class MultiAccountControl : UserControl
     {
         private readonly MultiAccountManager manager;
+        private readonly IClientLogSink clientLog;
         private readonly DataGridView grid;
         private readonly TextBox displayNameBox;
         private readonly TextBox usernameBox;
@@ -547,9 +548,16 @@ namespace TianshuQitanLauncher
         private bool suppressSelectionChanged;
 
         public MultiAccountControl(MultiAccountManager manager)
+            : this(manager, NullClientLogSink.Instance)
+        {
+        }
+
+        public MultiAccountControl(MultiAccountManager manager, IClientLogSink clientLog)
         {
             if (manager == null) throw new ArgumentNullException("manager");
+            if (clientLog == null) throw new ArgumentNullException("clientLog");
             this.manager = manager;
+            this.clientLog = clientLog;
             Dock = DockStyle.Fill;
             Padding = new Padding(6);
 
@@ -828,6 +836,8 @@ namespace TianshuQitanLauncher
         {
             statusLabel.ForeColor = error ? Color.DarkRed : Color.DarkSlateBlue;
             statusLabel.Text = text;
+            clientLog.Publish("多开管理", error ? ClientLogLevel.Error : ClientLogLevel.Info,
+                error ? "Failed" : "Ready", text);
         }
 
         private static Label LabelFor(string text)

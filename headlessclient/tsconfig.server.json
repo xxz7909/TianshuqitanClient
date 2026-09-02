@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist/server",
+    "rootDir": "src",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["src/server/**/*.ts", "src/protocol/**/*.ts", "src/shared/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}
