@@ -1,10 +1,48 @@
+# .NET / local build output
 bin/
 obj/
+.build/
+artifacts/
+TestResults/
 packages/
+
+# Front-end dependencies and generated output
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Local tools and IDE state
 .tools/
+.vs/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Runtime captures, databases, caches and logs
 data/
 captures/
-docs/account.md
-*.tsqop.sqlite
+logs/
+*.log
+*.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite-journal
+*.cache
+*.tmp
+*.temp
+
+# Machine-local credentials and account notes
+.env
+.env.*
+!.env.example
+docs/account.md
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
