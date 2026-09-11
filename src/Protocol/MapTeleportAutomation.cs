@@ -196,6 +196,9 @@ namespace TianshuQitanLauncher.Protocol
     {
         private static readonly IList<MapTeleportDestination> destinations = new List<MapTeleportDestination>
         {
+            // 新月村 mapId=3：来自 session-20260903-084827 “传送到新月村”录制。
+            // SC_MAP_INFO 落点 (2240,384)；蟠龙图腾 NPC 542 (36,22)。
+            Create(3, "新月村", 2240, 384, 542, 36, 22),
             Create(86, "三界关", 2112, 1024, 575, 33, 65),
             Create(12, "灵昌城", 3424, 1328, 544, 40, 81),
             Create(76, "坠龙城", 896, 3360, 560, 14, 211),
@@ -297,6 +300,9 @@ namespace TianshuQitanLauncher.Protocol
         public static BountyTravelTarget GetTotemTravelTarget(int mapId)
         {
             MapTeleportDestination destination = GetRequired(mapId);
+            if (destination.TotemNpcId <= 0)
+                throw new InvalidOperationException("地图 " + destination.MapName +
+                    " 尚未录制蟠龙图腾 NPC，无法使用旧任务链接瞬移；请先用传送点直传到达该地图完成采集。");
             return new BountyTravelTarget
             {
                 NpcId = destination.TotemNpcId,
@@ -1167,7 +1173,7 @@ namespace TianshuQitanLauncher.Protocol
             {
                 AutoSize = true,
                 ForeColor = Color.DarkRed,
-                Text = "提示：目录只包含录制确认的 42 张地图和对应蟠龙图腾；飞行目标必须是游戏地图允许到达的坐标。服务端拒绝或阶段超时会自动停止。"
+                Text = "提示：目录包含已确认的地图及对应蟠龙图腾；新月村等尚未录制蟠龙图腾的地图暂不支持旧链接瞬移，可用传送点直传后采集。飞行目标必须是游戏地图允许到达的坐标。服务端拒绝或阶段超时会自动停止。"
             }, 0, 6);
             Controls.Add(layout);
 

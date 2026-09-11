@@ -21,6 +21,7 @@ namespace TianshuQitanLauncher.Protocol
         private readonly RunLoopAutomationCoordinator runLoopAutomation;
         private readonly MountainClimbAutomationCoordinator mountainClimbAutomation;
         private readonly MapTeleportAutomationCoordinator mapTeleportAutomation;
+        private readonly NpcCatalogHarvesterCoordinator npcCatalogHarvester;
         private readonly ClientLogHub clientLogHub;
         private readonly List<TransportChunk> chunks = new List<TransportChunk>();
         private readonly List<ProtocolFrame> frames = new List<ProtocolFrame>();
@@ -120,7 +121,30 @@ namespace TianshuQitanLauncher.Protocol
             AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
             DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
             MountainClimbAutomationCoordinator mountainClimbAutomation,
+            MapTeleportAutomationCoordinator mapTeleportAutomation,
+            NpcCatalogHarvesterCoordinator npcCatalogHarvester, MultiAccountManager multiAccountManager)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, runLoopAutomation,
+                mountainClimbAutomation, mapTeleportAutomation, npcCatalogHarvester, multiAccountManager, new ClientLogHub())
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MountainClimbAutomationCoordinator mountainClimbAutomation,
             MapTeleportAutomationCoordinator mapTeleportAutomation, MultiAccountManager multiAccountManager,
+            ClientLogHub clientLogHub)
+            : this(service, loginAutomation, audioFilterProxy, bountyAutomation, donationAutomation, runLoopAutomation,
+                mountainClimbAutomation, mapTeleportAutomation, null, multiAccountManager, clientLogHub)
+        {
+        }
+
+        public ProtocolWorkbenchControl(ProtocolWorkbenchService service, LoginAutomationCoordinator loginAutomation,
+            AudioFilterProxy audioFilterProxy, BountyAutomationCoordinator bountyAutomation,
+            DonationAutomationCoordinator donationAutomation, RunLoopAutomationCoordinator runLoopAutomation,
+            MountainClimbAutomationCoordinator mountainClimbAutomation,
+            MapTeleportAutomationCoordinator mapTeleportAutomation,
+            NpcCatalogHarvesterCoordinator npcCatalogHarvester, MultiAccountManager multiAccountManager,
             ClientLogHub clientLogHub)
         {
             if (service == null) throw new ArgumentNullException("service");
@@ -133,6 +157,7 @@ namespace TianshuQitanLauncher.Protocol
             this.runLoopAutomation = runLoopAutomation;
             this.mountainClimbAutomation = mountainClimbAutomation;
             this.mapTeleportAutomation = mapTeleportAutomation;
+            this.npcCatalogHarvester = npcCatalogHarvester;
             this.clientLogHub = clientLogHub;
             Dock = DockStyle.Fill;
             BackColor = SystemColors.Control;
@@ -374,6 +399,14 @@ namespace TianshuQitanLauncher.Protocol
                 mapTeleportPage.Controls.Add(mapTeleportControl);
             }
 
+            TabPage npcCatalogPage = null;
+            if (npcCatalogHarvester != null)
+            {
+                NpcCatalogHarvesterControl npcCatalogControl = new NpcCatalogHarvesterControl(npcCatalogHarvester);
+                npcCatalogPage = new TabPage("NPC 目录采集");
+                npcCatalogPage.Controls.Add(npcCatalogControl);
+            }
+
             ruleBinding = new BindingList<PacketRule>(new List<PacketRule>(service.Rules.Rules));
             ruleGrid = new DataGridView
             {
@@ -420,6 +453,7 @@ namespace TianshuQitanLauncher.Protocol
             if (runLoopPage != null) featureTabs.TabPages.Add(runLoopPage);
             if (mountainClimbPage != null) featureTabs.TabPages.Add(mountainClimbPage);
             if (mapTeleportPage != null) featureTabs.TabPages.Add(mapTeleportPage);
+            if (npcCatalogPage != null) featureTabs.TabPages.Add(npcCatalogPage);
             featureTabs.TabPages.Add(operationPage);
             featureTabs.TabPages.Add(rulePage);
             featureTabs.TabPages.Add(definitionPage);
@@ -492,6 +526,7 @@ namespace TianshuQitanLauncher.Protocol
             if (runLoopAutomation != null) runLoopAutomation.StatusChanged += OnRunLoopAutomationStatusChanged;
             if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged += OnMountainClimbAutomationStatusChanged;
             if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged += OnMapTeleportAutomationStatusChanged;
+            if (npcCatalogHarvester != null) npcCatalogHarvester.StatusChanged += OnNpcCatalogHarvesterStatusChanged;
             if (audioFilterProxy != null)
             {
                 audioFilterProxy.StatusChanged += OnAudioFilterStatusChanged;
@@ -508,6 +543,7 @@ namespace TianshuQitanLauncher.Protocol
             if (runLoopAutomation != null) runLoopAutomation.StatusChanged -= OnRunLoopAutomationStatusChanged;
             if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged -= OnMountainClimbAutomationStatusChanged;
             if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged -= OnMapTeleportAutomationStatusChanged;
+            if (npcCatalogHarvester != null) npcCatalogHarvester.StatusChanged -= OnNpcCatalogHarvesterStatusChanged;
             if (audioFilterProxy != null) audioFilterProxy.StatusChanged -= OnAudioFilterStatusChanged;
         }
 
@@ -539,6 +575,11 @@ namespace TianshuQitanLauncher.Protocol
         private void OnMapTeleportAutomationStatusChanged(MapTeleportAutomationState state, string message)
         {
             PublishAutomationLog("地图传送", state.ToString(), message);
+        }
+
+        private void OnNpcCatalogHarvesterStatusChanged(NpcCatalogHarvesterState state, string message)
+        {
+            PublishAutomationLog("NPC目录采集", state.ToString(), message);
         }
 
         private void OnAudioFilterStatusChanged(string message)

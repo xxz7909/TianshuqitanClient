@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using Newtonsoft.Json;
 
 namespace TianshuQitanLauncher.Protocol
 {
@@ -14,7 +17,8 @@ namespace TianshuQitanLauncher.Protocol
     {
         Unknown = 0,
         DeliverItem = 1,
-        Hunt = 2
+        Hunt = 2,
+        TalkToNpc = 3
     }
 
     public enum RunLoopAutomationState
@@ -62,7 +66,8 @@ namespace TianshuQitanLauncher.Protocol
         public override string ToString()
         {
             string kind = Kind == RunLoopTaskKind.DeliverItem ? "提交道具" :
-                (Kind == RunLoopTaskKind.Hunt ? "战斗" : "未知");
+                (Kind == RunLoopTaskKind.Hunt ? "战斗" :
+                (Kind == RunLoopTaskKind.TalkToNpc ? "NPC 对话" : "未知"));
             string progress = Required > 0 ? " " + Progress + "/" + Required : string.Empty;
             return "第 " + RingNumber + " 环 / " + kind + progress + " / " + (Description ?? string.Empty);
         }
@@ -84,12 +89,178 @@ namespace TianshuQitanLauncher.Protocol
         public int Y { get; set; }
     }
 
+    public sealed class RunLoopMapGrid
+    {
+        public int MapId { get; set; }
+        public int RpWidth { get; set; }
+        public int RpHeight { get; set; }
+        public int Rows { get; set; }
+        public int Cols { get; set; }
+        public byte[] Cells { get; set; }
+
+        public bool IsWalkable(int col, int row)
+        {
+            if (Cells == null || col < 0 || col >= Cols || row < 0 || row >= Rows) return false;
+            return Cells[row * Cols + col] != 0;
+        }
+
+        public bool TryGetScaledCenter(int col, int row, out ushort scaledX, out ushort scaledY)
+        {
+            scaledX = 0;
+            scaledY = 0;
+            if (RpWidth <= 0 || RpHeight <= 0) return false;
+            int halfWidth = RpWidth / 2;
+            int halfHeight = RpHeight / 2;
+            int x = col * RpWidth + ((row & 1) == 1 ? halfWidth : 0);
+            int y = (row - 1) * halfHeight + halfHeight;
+            scaledX = (ushort)Math.Max(0, Math.Min(UInt16.MaxValue, x));
+            scaledY = (ushort)Math.Max(0, Math.Min(UInt16.MaxValue, y));
+            return true;
+        }
+
+        public bool TryGetRp(int scaledX, int scaledY, out int col, out int row)
+        {
+            col = 0;
+            row = 0;
+            if (RpWidth <= 0 || RpHeight <= 0) return false;
+            int halfWidth = RpWidth / 2;
+            int halfHeight = RpHeight / 2;
+            int r = (scaledY - halfHeight) / halfHeight + 1;
+            int xOffset = (r & 1) == 1 ? halfWidth : 0;
+            int c = (scaledX - xOffset) / RpWidth;
+            if (r < 0) r = 0;
+            if (c < 0) c = 0;
+            col = c;
+            row = r;
+            return c >= 0 && c < Cols && r >= 0 && r < Rows;
+        }
+    }
+
+    public sealed class RunLoopWalkOptions
+    {
+        // Code configuration: change these defaults and rebuild, or pass options to the coordinator.
+        public RunLoopWalkOptions()
+        {
+            StepIntervalMs = 200;
+            InitialDelayMs = 200;
+            PatrolPointCount = 4;
+            MapDataWaitTimeoutMs = 10000;
+            NoProgressTimeoutMs = 75000;
+            RecoveryIntervalMs = 4000;
+            MaximumHuntRetries = 3;
+        }
+
+        public int StepIntervalMs { get; set; }
+        public int InitialDelayMs { get; set; }
+        public int PatrolPointCount { get; set; }
+        public int MapDataWaitTimeoutMs { get; set; }
+        public int NoProgressTimeoutMs { get; set; }
+        public int RecoveryIntervalMs { get; set; }
+        public int MaximumHuntRetries { get; set; }
+
+        internal RunLoopWalkOptions ValidatedCopy()
+        {
+            if (StepIntervalMs < 1 || InitialDelayMs < 0 || PatrolPointCount < 2 || PatrolPointCount > 16 ||
+                MapDataWaitTimeoutMs < 1 || NoProgressTimeoutMs < 1 || RecoveryIntervalMs < 1 || MaximumHuntRetries < 0)
+                throw new ArgumentOutOfRangeException("walkOptions", "走步间隔必须为正数，巡逻点数为 2–16，延迟和重试次数不能为负数。");
+            return (RunLoopWalkOptions)MemberwiseClone();
+        }
+    }
+
+    // A short connected path, traversed A→B→C→D→C→B→A. Never grows with each tick.
+    public sealed class RunLoopPatrolPath
+    {
+        private readonly IList<Point> points;
+        private int nextIndex = 1;
+        private int direction = 1;
+
+        private RunLoopPatrolPath(List<Point> points) { this.points = points.AsReadOnly(); }
+        public IList<Point> Points { get { return points; } }
+
+        public Point Next()
+        {
+            Point result = points[nextIndex];
+            if (nextIndex == points.Count - 1) direction = -1;
+            else if (nextIndex == 0) direction = 1;
+            nextIndex += direction;
+            return result;
+        }
+
+        public static bool TryCreate(RunLoopMapGrid grid, ushort x, ushort y, int maximumPoints, out RunLoopPatrolPath path)
+        {
+            path = null;
+            if (maximumPoints < 2 || maximumPoints > 16) throw new ArgumentOutOfRangeException("maximumPoints");
+            if (grid == null || grid.RpWidth < 2 || grid.RpHeight < 2 || grid.Cells == null ||
+                grid.Rows <= 0 || grid.Cols <= 0 || (long)grid.Rows * grid.Cols > grid.Cells.Length) return false;
+            int col;
+            int row;
+            if (!grid.TryGetRp(x, y, out col, out row)) return false;
+
+            // Select the closest walkable anchor in the current cell's immediate neighbourhood.
+            Point anchor = Point.Empty;
+            long bestDistance = long.MaxValue;
+            for (int c = col - 1; c <= col + 1; c++)
+                for (int r = row - 1; r <= row + 1; r++)
+                {
+                    Point center;
+                    if (!TryCenter(grid, c, r, out center)) continue;
+                    long distance = (long)(center.X - x) * (center.X - x) + (long)(center.Y - y) * (center.Y - y);
+                    if (distance < bestDistance) { bestDistance = distance; anchor = new Point(c, r); }
+                }
+            if (bestDistance == long.MaxValue) return false;
+
+            List<Point> cells = new List<Point> { anchor };
+            Point first;
+            TryCenter(grid, anchor.X, anchor.Y, out first);
+            List<Point> centers = new List<Point> { first };
+            while (centers.Count < maximumPoints)
+            {
+                Point last = cells[cells.Count - 1];
+                int parity = last.Y & 1;
+                int[] dx = { 1, 0, parity, parity - 1, -1, 0, parity - 1, parity };
+                int[] dy = { 0, 2, 1, 1, 0, -2, -1, -1 };
+                bool found = false;
+                for (int i = 0; i < dx.Length; i++)
+                {
+                    Point cell = new Point(last.X + dx[i], last.Y + dy[i]);
+                    Point center;
+                    if (cells.Contains(cell) || !TryCenter(grid, cell.X, cell.Y, out center) || centers.Contains(center)) continue;
+                    cells.Add(cell);
+                    centers.Add(center);
+                    found = true;
+                    break;
+                }
+                if (!found) break;
+            }
+            if (centers.Count < 2) return false;
+            path = new RunLoopPatrolPath(centers);
+            return true;
+        }
+
+        private static bool TryCenter(RunLoopMapGrid grid, int col, int row, out Point center)
+        {
+            center = Point.Empty;
+            if (!grid.IsWalkable(col, row)) return false;
+            long rawX = (long)col * grid.RpWidth + ((row & 1) == 1 ? grid.RpWidth / 2 : 0);
+            long rawY = (long)row * (grid.RpHeight / 2);
+            if (rawX < 0 || rawX > UInt16.MaxValue || rawY < 0 || rawY > UInt16.MaxValue) return false;
+            ushort x;
+            ushort y;
+            if (!grid.TryGetScaledCenter(col, row, out x, out y)) return false;
+            center = new Point(x, y);
+            return true;
+        }
+    }
+
     public static class TianshuRunLoopProtocol
     {
         public const int ClientMovement = 0x00C1;
         public const int ClientUiAction = 0x002E;
         public const int OneKeyRecoveryAction = 0x0321;
+        public const int ServerTaskList = 0x003D;
         public const int ServerTaskUpdate = 0x003E;
+        public const int ServerTaskRemoved = 0x003F;
+        public const int ServerMapData2 = 0x003C;
         public const int ServerMapInfo = 0x0055;
         public const int ServerEntityList = 0x001C;
         public const int ServerNearbyEntities = 0x006A;
@@ -99,11 +270,14 @@ namespace TianshuQitanLauncher.Protocol
 
         private static readonly Regex RingRegex = new Regex(@"第\s*(\d+)\s*环", RegexOptions.CultureInvariant);
         private static readonly Regex DeliveryRegex = new Regex(
-            @"将(?<item>.+?)送给到(?<map>.+?)的(?<npc>.+?)\((?<x>\d+)\s*,\s*(?<y>\d+)\)",
+            @"将(?<item>.+?)(?:送给到|送到|交给)(?<map>.+?)的(?<npc>.+?)[（(](?<x>\d+)\s*[,，]\s*(?<y>\d+)[)）]",
             RegexOptions.CultureInvariant);
-        private static readonly Regex HuntMapRegex = new Regex(@"^去(?<map>.+?)消灭", RegexOptions.CultureInvariant);
+        private static readonly Regex HuntMapRegex = new Regex(@"^(?:前往|去)(?<map>.+?)消灭", RegexOptions.CultureInvariant);
+        private static readonly Regex TalkToNpcRegex = new Regex(
+            @"^与(?<map>.+?)的(?<npc>.+?)[（(](?<x>\d+)\s*[,，]\s*(?<y>\d+)[)）]对话[，,]?\s*(?:后\s*)?领取下一环任务",
+            RegexOptions.CultureInvariant);
         private static readonly Regex TurnInRegex = new Regex(
-            @"到(?<map>[^，。]+?)的(?<npc>[^，。]+?)\((?<x>\d+)\s*,\s*(?<y>\d+)\)处领取",
+            @"到(?<map>[^，。]+?)的(?<npc>[^，。]+?)[（(](?<x>\d+)\s*[,，]\s*(?<y>\d+)[)）]处领取",
             RegexOptions.CultureInvariant);
         private static readonly Regex ProgressRegex = new Regex(
             @"(?<name>[^,，]+?)\s*[（(]\s*(?<current>\d+)\s*/\s*(?<required>\d+)\s*[）)]",
@@ -179,11 +353,102 @@ namespace TianshuQitanLauncher.Protocol
             return map.MapId > 0;
         }
 
+        public static bool TryParseMapData(byte[] bytes, out RunLoopMapGrid grid)
+        {
+            grid = null;
+            if (!TianshuBountyProtocol.HasOpcode(bytes, ServerMapData2) || bytes.Length < 24) return false;
+            int offset = 4;
+            int mapId = ReadUInt16(bytes, offset);
+            offset += 2;
+            string ignoredName;
+            if (!TryReadString(bytes, ref offset, out ignoredName)) return false;
+
+            int[] values = new int[9];
+            for (int i = 0; i < values.Length; i++)
+            {
+                values[i] = ReadUInt16(bytes, offset);
+                offset += 2;
+            }
+            offset += 4; // mapMark (int)
+            offset += 2; // unknown short
+            int compressedLength = (int)ReadUInt32(bytes, offset);
+            offset += 4;
+            if (compressedLength <= 2 || offset + compressedLength > bytes.Length) return false;
+
+            byte[] inflated = InflateZlib(bytes, offset, compressedLength);
+            if (inflated == null || inflated.Length == 0) return false;
+
+            int rows = values[7];
+            int cols = values[8];
+            if (rows <= 0 || cols <= 0 || rows * cols > inflated.Length) return false;
+
+            grid = new RunLoopMapGrid
+            {
+                MapId = mapId,
+                RpWidth = values[5],
+                RpHeight = values[6],
+                Rows = rows,
+                Cols = cols,
+                Cells = new byte[rows * cols]
+            };
+            Array.Copy(inflated, grid.Cells, rows * cols);
+            return true;
+        }
+
         public static bool TryParseTask(byte[] bytes, out RunLoopTask task)
         {
             task = null;
             if (!TianshuBountyProtocol.HasOpcode(bytes, ServerTaskUpdate)) return false;
-            IList<string> strings = ExtractStrings(bytes);
+            return TryParseTaskText(ExtractStrings(bytes), out task);
+        }
+
+        public static bool IsRunLoopTaskRemoved(byte[] bytes)
+        {
+            if (!TianshuBountyProtocol.HasOpcode(bytes, ServerTaskRemoved)) return false;
+            int offset = 4;
+            string id;
+            return TryReadString(bytes, ref offset, out id) && offset == bytes.Length &&
+                string.Equals(id, TaskId, StringComparison.Ordinal);
+        }
+
+        public static bool TryParseTaskList(byte[] bytes, out RunLoopTask task)
+        {
+            task = null;
+            if (!TianshuBountyProtocol.HasOpcode(bytes, ServerTaskList) || bytes.Length < 8) return false;
+            int compressedLength = ReadUInt16(bytes, 4);
+            if (compressedLength <= 2 || 6 + compressedLength > bytes.Length) return false;
+            byte[] inflated = InflateZlib(bytes, 6, compressedLength);
+            if (inflated == null || inflated.Length == 0) return false;
+
+            byte[] taskIdBytes = Encoding.UTF8.GetBytes(TaskId);
+            int recordOffset = IndexOfBytes(inflated, taskIdBytes);
+            if (recordOffset < 2 || ReadUInt16(inflated, recordOffset - 2) != taskIdBytes.Length) return false;
+            int recordStart = recordOffset - 2;
+            int recordLength = Math.Min(inflated.Length - recordStart, 2048);
+            byte[] record = new byte[recordLength];
+            Array.Copy(inflated, recordStart, record, 0, recordLength);
+            return TryParseTaskText(ExtractStrings(record, 0), out task);
+        }
+
+        private static int IndexOfBytes(byte[] haystack, byte[] needle)
+        {
+            if (haystack == null || needle == null || needle.Length == 0 || haystack.Length < needle.Length) return -1;
+            for (int i = 0; i <= haystack.Length - needle.Length; i++)
+            {
+                bool matched = true;
+                for (int j = 0; j < needle.Length; j++)
+                {
+                    if (haystack[i + j] != needle[j]) { matched = false; break; }
+                }
+                if (matched) return i;
+            }
+            return -1;
+        }
+
+        private static bool TryParseTaskText(IList<string> strings, out RunLoopTask task)
+        {
+            task = null;
+            if (strings == null) return false;
             bool correctTask = false;
             string description = null;
             int ring = 0;
@@ -202,8 +467,8 @@ namespace TianshuQitanLauncher.Protocol
                 }
                 int deliveryStart = visibleText.IndexOf("将", StringComparison.Ordinal);
                 int huntStart = visibleText.IndexOf("去", StringComparison.Ordinal);
-                int descriptionStart = deliveryStart < 0 ? huntStart :
-                    (huntStart < 0 ? deliveryStart : Math.Min(deliveryStart, huntStart));
+                int talkStart = visibleText.IndexOf("与", StringComparison.Ordinal);
+                int descriptionStart = FirstNonNegative(deliveryStart, huntStart, talkStart);
                 if (descriptionStart >= 0 && visibleText.IndexOf("领取下一环任务", descriptionStart,
                     StringComparison.Ordinal) >= 0)
                 {
@@ -224,36 +489,69 @@ namespace TianshuQitanLauncher.Protocol
             }
             else
             {
-                Match huntMap = HuntMapRegex.Match(description);
-                Match turnIn = TurnInRegex.Match(description);
-                if (!huntMap.Success || !turnIn.Success) return false;
-                parsed.Kind = RunLoopTaskKind.Hunt;
-                parsed.HuntMapName = NormalizeName(huntMap.Groups["map"].Value);
-                ApplyTurnIn(parsed, turnIn);
-                for (int i = 0; i < strings.Count; i++)
+                Match talkToNpc = TalkToNpcRegex.Match(description);
+                if (talkToNpc.Success)
                 {
-                    Match progress = ProgressRegex.Match(NormalizeTaskText(strings[i]));
-                    int current;
-                    int required;
-                    if (!progress.Success || !Int32.TryParse(progress.Groups["current"].Value, out current) ||
-                        !Int32.TryParse(progress.Groups["required"].Value, out required) || required <= 0) continue;
-                    parsed.ObjectiveName = progress.Groups["name"].Value.Trim();
-                    parsed.Progress = current;
-                    parsed.Required = required;
-                    break;
+                    parsed.Kind = RunLoopTaskKind.TalkToNpc;
+                    ApplyTurnIn(parsed, talkToNpc);
+                    parsed.Progress = 0;
+                    parsed.Required = 1;
                 }
-                if (parsed.Required <= 0)
+                else
                 {
-                    Match requiredInDescription = Regex.Match(description, @"(?:消灭|得到)\s*(\d+)\s*个",
-                        RegexOptions.CultureInvariant);
-                    int required;
-                    parsed.Required = requiredInDescription.Success && Int32.TryParse(requiredInDescription.Groups[1].Value, out required)
-                        ? required : 1;
+                    Match huntMap = HuntMapRegex.Match(description);
+                    Match turnIn = TurnInRegex.Match(description);
+                    if (!huntMap.Success || !turnIn.Success) return false;
+                    parsed.Kind = RunLoopTaskKind.Hunt;
+                    parsed.HuntMapName = NormalizeName(huntMap.Groups["map"].Value);
+                    ApplyTurnIn(parsed, turnIn);
+                    for (int i = 0; i < strings.Count; i++)
+                    {
+                        Match progress = ProgressRegex.Match(NormalizeTaskText(strings[i]));
+                        int current;
+                        int required;
+                        if (!progress.Success || !Int32.TryParse(progress.Groups["current"].Value, out current) ||
+                            !Int32.TryParse(progress.Groups["required"].Value, out required) || required <= 0) continue;
+                        parsed.ObjectiveName = progress.Groups["name"].Value.Trim();
+                        parsed.Progress = current;
+                        parsed.Required = required;
+                        break;
+                    }
+                    if (parsed.Required <= 0)
+                    {
+                        Match requiredInDescription = Regex.Match(description, @"(?:消灭|得到)\s*(\d+)\s*个",
+                            RegexOptions.CultureInvariant);
+                        int required;
+                        parsed.Required = requiredInDescription.Success && Int32.TryParse(requiredInDescription.Groups[1].Value, out required)
+                            ? required : 1;
+                    }
                 }
             }
             ApplyRecordedTravelLink(parsed, strings);
             task = parsed;
             return true;
+        }
+
+        private static byte[] InflateZlib(byte[] data, int offset, int length)
+        {
+            if (data == null || offset < 0 || length < 0 || offset + length > data.Length || length <= 2) return null;
+            try
+            {
+                using (MemoryStream input = new MemoryStream(data, offset + 2, length - 2))
+                using (DeflateStream deflate = new DeflateStream(input, CompressionMode.Decompress))
+                using (MemoryStream output = new MemoryStream())
+                {
+                    byte[] buffer = new byte[4096];
+                    int read;
+                    while ((read = deflate.Read(buffer, 0, buffer.Length)) > 0)
+                        output.Write(buffer, 0, read);
+                    return output.ToArray();
+                }
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
         }
 
         public static IList<RunLoopEntity> ExtractEntities(byte[] bytes)
@@ -311,7 +609,6 @@ namespace TianshuQitanLauncher.Protocol
         private static void ApplyRecordedTravelLink(RunLoopTask task, IList<string> strings)
         {
             if (task == null || strings == null) return;
-            BountyTravelTarget selected = null;
             for (int i = 0; i < strings.Count; i++)
             {
                 IList<BountyTravelTarget> links = TianshuBountyProtocol.ExtractTravelLinks(strings[i]);
@@ -320,18 +617,14 @@ namespace TianshuQitanLauncher.Protocol
                     BountyTravelTarget link = links[j];
                     if (link.X == task.TurnInX && link.Y == task.TurnInY)
                     {
-                        selected = link;
-                        break;
+                        task.TurnInNpcId = link.NpcId;
+                        task.TurnInMapId = link.MapId;
+                        task.TurnInX = link.X;
+                        task.TurnInY = link.Y;
+                        return;
                     }
-                    if (selected == null) selected = link;
                 }
-                if (selected != null && selected.X == task.TurnInX && selected.Y == task.TurnInY) break;
             }
-            if (selected == null) return;
-            task.TurnInNpcId = selected.NpcId;
-            task.TurnInMapId = selected.MapId;
-            task.TurnInX = selected.X;
-            task.TurnInY = selected.Y;
         }
 
         private static void ApplyTurnIn(RunLoopTask task, Match match)
@@ -342,10 +635,25 @@ namespace TianshuQitanLauncher.Protocol
             task.TurnInY = Int32.Parse(match.Groups["y"].Value);
         }
 
+        private static int FirstNonNegative(params int[] values)
+        {
+            int result = -1;
+            for (int i = 0; i < values.Length; i++)
+                if (values[i] >= 0 && (result < 0 || values[i] < result)) result = values[i];
+            return result;
+        }
+
         private static IList<string> ExtractStrings(byte[] bytes)
         {
+            return ExtractStrings(bytes, 4);
+        }
+
+        private static IList<string> ExtractStrings(byte[] bytes, int startOffset)
+        {
             List<string> result = new List<string>();
-            for (int offset = 4; offset + 2 <= bytes.Length; offset++)
+            if (bytes == null) return result;
+            if (startOffset < 0) startOffset = 0;
+            for (int offset = startOffset; offset + 2 <= bytes.Length; offset++)
             {
                 string value;
                 int ignored;
@@ -481,12 +789,16 @@ namespace TianshuQitanLauncher.Protocol
         private const int StartNpcId = 93290;
         private const int StartMapId = 72;
         private const int RingsPerRound = 20;
-        private const int DailyMaximumRounds = 4;
+        public const int MaximumPlannedRounds = 6;
 
         private enum DestinationPurpose { None, StartNpc, TurnInNpc, Hunt }
 
         private readonly object syncRoot = new object();
         private readonly ProtocolWorkbenchService service;
+        private readonly RunLoopWalkOptions walkOptions;
+        private RunLoopPatrolPath patrolPath;
+        private readonly Stopwatch huntProgressWatch = new Stopwatch();
+        private readonly Stopwatch mapDataWaitWatch = new Stopwatch();
         private readonly Dictionary<long, ConnectionSession> gameConnections = new Dictionary<long, ConnectionSession>();
         private readonly Dictionary<string, BountyTravelTarget> npcDirectory = new Dictionary<string, BountyTravelTarget>(StringComparer.Ordinal);
         private readonly ManualResetEvent catalogReady = new ManualResetEvent(false);
@@ -508,23 +820,37 @@ namespace TianshuQitanLauncher.Protocol
         private string currentMapName;
         private ushort currentScaledX;
         private ushort currentScaledY;
+        private RunLoopMapGrid currentMapGrid;
         private int plannedRounds;
         private int completedRounds;
         private int completedRings;
+        // A task update immediately preceding removal can still describe the submitted ring.
+        // Count only the correlated removal, and gate snapshots until the expected next ring arrives.
+        private int pendingTurnInRing;
+        private int expectedNextRing;
         private bool automaticRecovery;
         private bool activatedByAutomation;
         private int walkStep;
+        private int huntRetryCount;
         private int generation;
         private bool disposed;
 
         public event Action<RunLoopAutomationState, string> StatusChanged;
 
         public RunLoopAutomationCoordinator(ProtocolWorkbenchService service)
+            : this(service, new RunLoopWalkOptions())
+        {
+        }
+
+        public RunLoopAutomationCoordinator(ProtocolWorkbenchService service, RunLoopWalkOptions walkOptions)
         {
             if (service == null) throw new ArgumentNullException("service");
+            if (walkOptions == null) throw new ArgumentNullException("walkOptions");
             this.service = service;
+            this.walkOptions = walkOptions.ValidatedCopy();
             state = RunLoopAutomationState.Inactive;
             SeedNpcDirectory();
+            LoadPersistedNpcCatalog();
             ThreadPool.QueueUserWorkItem(delegate { LoadNpcDirectoryFromSessions(); });
             service.ConnectionChanged += OnConnectionChanged;
             service.FrameCaptured += OnFrameCaptured;
@@ -539,7 +865,49 @@ namespace TianshuQitanLauncher.Protocol
 
         public void Start(int roundCount, bool enableAutomaticRecovery)
         {
-            if (roundCount < 1 || roundCount > DailyMaximumRounds) throw new ArgumentOutOfRangeException("roundCount");
+            Begin(roundCount, enableAutomaticRecovery, false);
+        }
+
+        public void Resume(int roundCount, bool enableAutomaticRecovery)
+        {
+            Begin(roundCount, enableAutomaticRecovery, true);
+        }
+
+        public string DescribeCurrentTaskAction()
+        {
+            RunLoopTask task = CurrentTask;
+            if (task == null) return "等待服务端任务包";
+
+            string action;
+            if (task.IsComplete)
+            {
+                action = "已可交付 → 交任务";
+            }
+            else if (task.Kind == RunLoopTaskKind.Hunt)
+            {
+                bool collect = task.Description != null && task.Description.IndexOf("得到", StringComparison.Ordinal) >= 0;
+                action = "战斗 " + task.Progress + "/" + task.Required +
+                    (collect ? "，获取物品：" + (task.ObjectiveName ?? "任务掉落") : string.Empty) + " → 继续战斗";
+            }
+            else if (task.Kind == RunLoopTaskKind.DeliverItem)
+            {
+                action = "提交道具“" + task.ItemName + "” → 交任务";
+            }
+            else if (task.Kind == RunLoopTaskKind.TalkToNpc)
+            {
+                action = "找 " + task.TurnInNpcName + " 对话 → 交任务";
+            }
+            else
+            {
+                action = "任务类型尚未识别，将安全停止";
+            }
+
+            return "第 " + task.RingNumber + " 环：" + action;
+        }
+
+        private void Begin(int roundCount, bool enableAutomaticRecovery, bool resumeFromCurrent)
+        {
+            if (roundCount < 1 || roundCount > MaximumPlannedRounds) throw new ArgumentOutOfRangeException("roundCount");
             string owner;
             if (!service.TryAcquireAutomation(AutomationOwner, out owner))
                 throw new InvalidOperationException("当前已有自动化流程正在运行：" + owner + "。请先停止后再启动自动跑环。");
@@ -559,8 +927,7 @@ namespace TianshuQitanLauncher.Protocol
                 currentGeneration = generation;
                 DisposeTimersLocked();
                 plannedRounds = roundCount;
-                completedRounds = 0;
-                completedRings = 0;
+                pendingTurnInRing = 0;
                 automaticRecovery = enableAutomaticRecovery;
                 route = null;
                 routeIndex = 0;
@@ -572,12 +939,28 @@ namespace TianshuQitanLauncher.Protocol
                 useExistingTask = canBegin && latestTask != null && DateTime.UtcNow - latestTaskUtc < TimeSpan.FromMinutes(30);
                 if (useExistingTask) existingTask = latestTask.Clone();
                 else if (latestTask != null && DateTime.UtcNow - latestTaskUtc >= TimeSpan.FromMinutes(30)) latestTask = null;
+                if (resumeFromCurrent && existingTask != null)
+                {
+                    completedRings = Math.Max(0, existingTask.RingNumber - 1);
+                    completedRounds = completedRings / RingsPerRound;
+                }
+                else
+                {
+                    completedRounds = 0;
+                    completedRings = 0;
+                }
                 state = !canBegin ? RunLoopAutomationState.WaitingForGameConnection :
                     (useExistingTask ? RunLoopAutomationState.WaitingForTask : RunLoopAutomationState.Traveling);
             }
             if (enableActive) service.SetActiveMode(true, false);
-            Publish(currentGeneration, state, "自动跑环已启动：每轮 20 环，本次最多 " + roundCount +
-                " 轮（每日服务端上限 4 轮）" + (enableAutomaticRecovery ? "，战斗中每 4 秒自动恢复。" : "。"), false);
+            string resumeHint = resumeFromCurrent
+                ? (existingTask == null
+                    ? "；未读取到最近任务，将前往柳先元获取当前环。"
+                    : "；从第 " + existingTask.RingNumber + " 环继续。")
+                : string.Empty;
+            Publish(currentGeneration, state, (resumeFromCurrent ? "自动跑环已从当前进度继续" : "自动跑环已启动") +
+                "：每轮 20 环，本次最多 " + roundCount + " 轮 / " + (roundCount * RingsPerRound) + " 环，次数以服务端许可为准" +
+                (enableAutomaticRecovery ? "，战斗中每 " + walkOptions.RecoveryIntervalMs + "ms 自动恢复。" : "。") + resumeHint, false);
             if (canBegin)
             {
                 if (useExistingTask) DispatchTask(currentGeneration, existingTask);
@@ -612,6 +995,10 @@ namespace TianshuQitanLauncher.Protocol
         private void SeedNpcDirectory()
         {
             AddNpc("柳先元", StartNpcId, StartMapId, 23, 132);
+            AddNpc("乔烈", 8021, 12, 39, 37);
+            AddNpc("舞修罗", 8011, 13, 30, 100);
+            AddNpc("冯奇", 10102, 101, 17, 73);
+            AddNpc("周猎户", 8032, 12, 31, 130);
             AddNpc("海蚌族蚌岳珊", 94018, 102, 2, 16);
             AddNpc("蚌岳珊", 94018, 102, 2, 16);
             AddNpc("刘兴", 8062, 13, 64, 113);
@@ -624,8 +1011,43 @@ namespace TianshuQitanLauncher.Protocol
 
         private void AddNpc(string name, int id, int mapId, int x, int y)
         {
-            npcDirectory[TianshuRunLoopProtocol.NormalizeName(name)] =
+            npcDirectory[BuildNpcKey(name, mapId)] =
                 new BountyTravelTarget { NpcId = id, MapId = mapId, X = x, Y = y };
+        }
+
+        private static string BuildNpcKey(string name, int mapId)
+        {
+            return TianshuRunLoopProtocol.NormalizeName(name) + "|" + mapId;
+        }
+
+        private void LoadPersistedNpcCatalog()
+        {
+            try
+            {
+                string catalogPath = service.Profile.Resolve("data/npc-catalog.json");
+                if (!File.Exists(catalogPath)) return;
+                NpcCatalogDocument document = JsonConvert.DeserializeObject<NpcCatalogDocument>(File.ReadAllText(catalogPath));
+                if (document == null || document.Entries == null) return;
+                int loaded = 0;
+                lock (syncRoot)
+                {
+                    for (int i = 0; i < document.Entries.Count; i++)
+                    {
+                        NpcCatalogEntry entry = document.Entries[i];
+                        if (entry == null || string.IsNullOrWhiteSpace(entry.Name) ||
+                            entry.NpcId <= 0 || entry.MapId <= 0) continue;
+                        AddNpc(entry.Name, entry.NpcId, entry.MapId, entry.X, entry.Y);
+                        loaded++;
+                    }
+                }
+                if (loaded > 0)
+                    service.ReportEngineEvent(AutomationOwner, "INFO",
+                        "已加载持久化 NPC 目录 " + loaded + " 条：" + catalogPath, null);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Cannot load persisted run-loop NPC catalog", ex);
+            }
         }
 
         private void LoadNpcDirectoryFromSessions()
@@ -680,9 +1102,9 @@ namespace TianshuQitanLauncher.Protocol
                                             for (int i = 0; i < entities.Count; i++)
                                             {
                                                 RunLoopEntity entity = entities[i];
-                                                string name = TianshuRunLoopProtocol.NormalizeName(entity.Name);
-                                                if (npcDirectory.ContainsKey(name)) continue;
-                                                npcDirectory[name] = new BountyTravelTarget
+                                                string key = BuildNpcKey(entity.Name, mapId);
+                                                if (npcDirectory.ContainsKey(key)) continue;
+                                                npcDirectory[key] = new BountyTravelTarget
                                                 {
                                                     NpcId = entity.Id,
                                                     MapId = mapId,
@@ -788,10 +1210,26 @@ namespace TianshuQitanLauncher.Protocol
                 if (TianshuRunLoopProtocol.TryParseTask(frame.Bytes, out task)) HandleTask(currentGeneration, task);
                 return;
             }
+            if (opcode == TianshuRunLoopProtocol.ServerTaskRemoved)
+            {
+                if (TianshuRunLoopProtocol.IsRunLoopTaskRemoved(frame.Bytes)) HandleTaskRemoved(currentGeneration);
+                return;
+            }
+            if (opcode == TianshuRunLoopProtocol.ServerTaskList)
+            {
+                RunLoopTask task;
+                if (TianshuRunLoopProtocol.TryParseTaskList(frame.Bytes, out task)) HandleTask(currentGeneration, task);
+                return;
+            }
             if (opcode == TianshuRunLoopProtocol.ServerMapInfo)
             {
                 RunLoopMapInfo map;
                 if (TianshuRunLoopProtocol.TryParseMapInfo(frame.Bytes, out map)) HandleMap(currentGeneration, map);
+                return;
+            }
+            if (opcode == TianshuRunLoopProtocol.ServerMapData2)
+            {
+                HandleMapData(frame.Bytes);
                 return;
             }
             if (opcode == TianshuRunLoopProtocol.ServerEntityList || opcode == TianshuRunLoopProtocol.ServerNearbyEntities)
@@ -801,10 +1239,11 @@ namespace TianshuQitanLauncher.Protocol
             }
             if (!IsRunning(State)) return;
             if (opcode == TianshuBountyProtocol.ServerSystemMessage &&
-                TianshuBountyProtocol.ContainsText(frame.Bytes, "今日") &&
                 TianshuBountyProtocol.ContainsText(frame.Bytes, "跑环") &&
                 (TianshuBountyProtocol.ContainsText(frame.Bytes, "上限") ||
-                TianshuBountyProtocol.ContainsText(frame.Bytes, "不能再")))
+                TianshuBountyProtocol.ContainsText(frame.Bytes, "不能再") ||
+                TianshuBountyProtocol.ContainsText(frame.Bytes, "无法再") ||
+                TianshuBountyProtocol.ContainsText(frame.Bytes, "已满")))
             {
                 Complete(currentGeneration, "服务端提示今日跑环次数已到上限，自动流程结束。");
                 return;
@@ -821,51 +1260,55 @@ namespace TianshuQitanLauncher.Protocol
         {
             RunLoopTask previous;
             bool running;
-            bool finish = false;
             bool changed = false;
             bool progressChanged = false;
             lock (syncRoot)
             {
+                if (expectedNextRing != 0 && task.RingNumber != expectedNextRing) return;
+                // While a turn-in is outstanding, old task refreshes are not a new assignment.
+                if (pendingTurnInRing != 0) return;
                 previous = latestTask;
+                if (previous != null && task.RingNumber != previous.RingNumber) return;
+                if (previous != null && task.Progress < previous.Progress) return;
+                expectedNextRing = 0;
                 latestTask = task.Clone();
                 latestTaskUtc = DateTime.UtcNow;
                 running = IsCurrentLocked(expectedGeneration);
                 if (!running) return;
-                if (previous != null && previous.RingNumber != task.RingNumber)
-                {
-                    completedRings++;
-                    changed = true;
-                    if (previous.RingNumber == RingsPerRound) completedRounds++;
-                    finish = completedRounds >= plannedRounds;
-                }
-                else if (previous != null && previous.Kind == RunLoopTaskKind.Hunt &&
+                changed = previous == null;
+                if (previous != null && previous.Kind == RunLoopTaskKind.Hunt &&
                     task.Kind == RunLoopTaskKind.Hunt && task.Progress > previous.Progress)
                 {
                     progressChanged = true;
+                    huntProgressWatch.Restart();
+                    huntRetryCount = 0;
                 }
             }
-            if (finish)
-            {
-                Complete(expectedGeneration, "已完成 " + CompletedRounds + "/" + PlannedRounds +
-                    " 轮（每轮 20 环），达到本次设置上限。");
-                return;
-            }
             if (changed) Publish(expectedGeneration, RunLoopAutomationState.WaitingForTask,
-                "上一环已交付；本次已处理 " + CompletedRings + " 环，完整轮数 " + CompletedRounds + "/" + PlannedRounds + "。", false);
+                "收到第 " + task.RingNumber + " 环任务；本次已交付 " + CompletedRings + " 环，完成轮数 " + CompletedRounds + "/" + PlannedRounds + "。", false);
             if (!changed && previous != null && previous.RingNumber == task.RingNumber)
             {
                 if (!progressChanged) return;
+                bool keepWalking;
                 lock (syncRoot)
                 {
                     if (!IsCurrentLocked(expectedGeneration)) return;
-                    DisposeStageTimerLocked();
-                    DisposeCombatTimersLocked();
-                    state = RunLoopAutomationState.WaitingForTask;
+                    keepWalking = state == RunLoopAutomationState.WalkingForEncounter ||
+                        state == RunLoopAutomationState.WaitingForCombatResult;
+                    if (!keepWalking || task.IsComplete)
+                    {
+                        DisposeStageTimerLocked();
+                        DisposeCombatTimersLocked();
+                        state = RunLoopAutomationState.WaitingForTask;
+                    }
                 }
-                Publish(expectedGeneration, RunLoopAutomationState.WaitingForTask,
-                    "第 " + task.RingNumber + " 环战斗进度 " + task.Progress + "/" + task.Required + "。", false);
+                Publish(expectedGeneration, keepWalking ? RunLoopAutomationState.WalkingForEncounter :
+                    RunLoopAutomationState.WaitingForTask,
+                    "第 " + task.RingNumber + " 环战斗进度 " + task.Progress + "/" + task.Required +
+                    (keepWalking ? "，继续持续走步。" : "。"), false);
                 if (!task.IsComplete)
                 {
+                    if (keepWalking) return;
                     int huntMapId;
                     if (TryResolveMapId(task.HuntMapName, out huntMapId) && huntMapId == currentMapId)
                         StartWalking(expectedGeneration);
@@ -887,20 +1330,67 @@ namespace TianshuQitanLauncher.Protocol
             DispatchTask(expectedGeneration, task);
         }
 
+        private void HandleTaskRemoved(int expectedGeneration)
+        {
+            bool running;
+            bool roundFinished;
+            bool finish;
+            int removedRing;
+            lock (syncRoot)
+            {
+                if (disposed) return;
+                removedRing = pendingTurnInRing;
+                running = IsCurrentLocked(expectedGeneration);
+                if (running && removedRing == 0) return;
+                // Duplicate removals and unrelated task removals must not count twice.
+                if (removedRing == 0 && latestTask == null) return;
+                int cachedRing = latestTask == null ? 0 : latestTask.RingNumber;
+                latestTask = null;
+                latestTaskUtc = DateTime.MinValue;
+                pendingTurnInRing = 0;
+                expectedNextRing = removedRing == 0 ? 0 : (removedRing % RingsPerRound) + 1;
+                if (!running)
+                {
+                    // A manually completed twentieth ring must not reappear from an old snapshot.
+                    if (removedRing == 0 && cachedRing == RingsPerRound) expectedNextRing = 1;
+                    return;
+                }
+                completedRings++;
+                roundFinished = removedRing == RingsPerRound;
+                if (roundFinished) completedRounds++;
+                finish = roundFinished && completedRounds >= plannedRounds;
+                DisposeTimersLocked();
+                state = RunLoopAutomationState.WaitingForTask;
+                if (!finish)
+                    ScheduleStageLocked(expectedGeneration, roundFinished ? 250 : 15000,
+                        roundFinished ? (Action<int>)BeginStartNpc : OnStageTimeout);
+            }
+            if (finish)
+                Complete(expectedGeneration, "已交付第 20 环，完成 " + CompletedRounds + "/" + PlannedRounds +
+                    " 轮，本次共交付 " + CompletedRings + " 环。");
+            else
+                Publish(expectedGeneration, RunLoopAutomationState.WaitingForTask,
+                    "第 " + removedRing + " 环交付已由服务端确认，旧任务已清除。" +
+                    (roundFinished ? "返回尚其村柳先元重新领取下一轮。" : "等待第 " + (removedRing + 1) + " 环任务。"), false);
+        }
+
         private void DispatchTask(int expectedGeneration, RunLoopTask task)
         {
-            if (task.Kind == RunLoopTaskKind.DeliverItem || task.IsComplete)
+            if (task.Kind == RunLoopTaskKind.DeliverItem || task.Kind == RunLoopTaskKind.TalkToNpc || task.IsComplete)
             {
                 BountyTravelTarget target;
                 if (!TryResolveNpc(task, out target))
                 {
                     Fail(expectedGeneration, "无法从已确认的 NPC 表解析“" + task.TurnInNpcName + "”（" +
-                        task.TurnInMapName + " " + task.TurnInX + "," + task.TurnInY + "）；已停止，未发送猜测 NPC ID。");
+                        task.TurnInMapName + " " + task.TurnInX + "," + task.TurnInY +
+                        "）；已停止，未发送猜测 NPC ID。请先在“NPC 目录采集”中遍历包含该 NPC 的地图，" +
+                        "或录制一次进入该地图并靠近该 NPC 的会话。");
                     return;
                 }
                 BeginRoute(expectedGeneration, new List<BountyTravelTarget> { target }, DestinationPurpose.TurnInNpc,
                     "第 " + task.RingNumber + " 环前往 " + task.TurnInNpcName +
-                    (task.Kind == RunLoopTaskKind.DeliverItem ? "提交“" + task.ItemName + "”" : "交付战斗任务"));
+                    (task.Kind == RunLoopTaskKind.DeliverItem ? "提交“" + task.ItemName + "”" :
+                    (task.Kind == RunLoopTaskKind.TalkToNpc ? "完成 NPC 对话" : "交付战斗任务")));
                 return;
             }
             if (task.Kind != RunLoopTaskKind.Hunt)
@@ -1012,6 +1502,8 @@ namespace TianshuQitanLauncher.Protocol
                 currentMapName = map.MapName;
                 currentScaledX = map.ScaledX;
                 currentScaledY = map.ScaledY;
+                currentMapGrid = null;
+                patrolPath = null;
                 running = IsCurrentLocked(expectedGeneration);
                 matches = running && currentDestination != null && map.MapId == currentDestination.MapId &&
                     (state == RunLoopAutomationState.Traveling || state == RunLoopAutomationState.WaitingForMap ||
@@ -1126,6 +1618,8 @@ namespace TianshuQitanLauncher.Protocol
                 {
                     if (!IsCurrentLocked(value) || state != RunLoopAutomationState.SelectingFunction) return;
                     state = RunLoopAutomationState.WaitingForTask;
+                    if (purpose == DestinationPurpose.TurnInNpc && latestTask != null)
+                        pendingTurnInRing = latestTask.RingNumber;
                     ScheduleStageLocked(value, 15000, OnStageTimeout);
                 }
                 SendPacket(value, "选择跑环功能 " + functionId, delegate(uint sequence)
@@ -1142,46 +1636,60 @@ namespace TianshuQitanLauncher.Protocol
                 if (!IsCurrentLocked(expectedGeneration)) return;
                 state = RunLoopAutomationState.WalkingForEncounter;
                 walkStep = 0;
+                patrolPath = null;
+                huntProgressWatch.Restart();
+                mapDataWaitWatch.Restart();
                 DisposeStageTimerLocked();
                 DisposeCombatTimersLocked();
-                walkTimer = new System.Threading.Timer(delegate { SendWalkStep(expectedGeneration); }, null, 200, 500);
+                walkTimer = new System.Threading.Timer(delegate { SendWalkStep(expectedGeneration); }, null,
+                    walkOptions.InitialDelayMs, walkOptions.StepIntervalMs);
                 if (automaticRecovery)
-                    recoveryTimer = new System.Threading.Timer(delegate { SendRecovery(expectedGeneration); }, null, 4000, 4000);
+                    recoveryTimer = new System.Threading.Timer(delegate { SendRecovery(expectedGeneration); }, null,
+                        walkOptions.RecoveryIntervalMs, walkOptions.RecoveryIntervalMs);
             }
             Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter,
-                "已到 " + currentMapName + "，开始 5 秒走步遇怪；战斗结果由任务进度包确认。", false);
+                "已到 " + currentMapName + "，每 " + walkOptions.StepIntervalMs + "ms 在最多 " +
+                walkOptions.PatrolPointCount + " 个有效点之间往返走步；战斗结果由任务进度包确认。", false);
         }
 
         private void SendWalkStep(int expectedGeneration)
         {
             int mapId;
-            ushort x;
-            ushort y;
-            int step;
+            bool stuck;
             lock (syncRoot)
             {
                 if (!IsCurrentLocked(expectedGeneration) || state != RunLoopAutomationState.WalkingForEncounter) return;
-                step = walkStep++;
                 mapId = currentMapId;
-                int[] dx = { 16, 32, 16, 0, -16, -32, -16, 0, 16, 0 };
-                int[] dy = { 0, 16, 32, 16, 0, -16, -32, -16, 0, 0 };
-                x = ClampCoordinate(currentScaledX + dx[step % dx.Length]);
-                y = ClampCoordinate(currentScaledY + dy[step % dy.Length]);
-                currentScaledX = x;
-                currentScaledY = y;
-                if (walkStep >= 10)
+                stuck = huntProgressWatch.ElapsedMilliseconds >= walkOptions.NoProgressTimeoutMs;
+                if (!stuck)
                 {
-                    state = RunLoopAutomationState.WaitingForCombatResult;
-                    if (walkTimer != null) { walkTimer.Dispose(); walkTimer = null; }
-                    ScheduleStageLocked(expectedGeneration, 9000, ResumeWalkingAfterTimeout);
+                    if (patrolPath == null)
+                    {
+                        RunLoopMapGrid grid = currentMapGrid != null && currentMapGrid.MapId == mapId ? currentMapGrid : null;
+                        if (!RunLoopPatrolPath.TryCreate(grid, currentScaledX, currentScaledY,
+                            walkOptions.PatrolPointCount, out patrolPath))
+                        {
+                            if (mapDataWaitWatch.ElapsedMilliseconds >= walkOptions.MapDataWaitTimeoutMs)
+                                Fail(expectedGeneration, "未能从当前地图数据找到至少两个相连的可行走点，已停止自动遇怪。");
+                            return;
+                        }
+                        Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter,
+                            "已固定 " + patrolPath.Points.Count + " 个有效走步点，开始循环往返。", false);
+                    }
+                    if (mapId <= 0) { Fail(expectedGeneration, "尚未取得当前地图 ID，无法构造走步包。"); return; }
+                    Point point = patrolPath.Next();
+                    currentScaledX = (ushort)point.X;
+                    currentScaledY = (ushort)point.Y;
+                    int step = ++walkStep;
+                    long epoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                    // Serialize the timer callbacks through packet submission so route order cannot overlap.
+                    SendPacket(expectedGeneration, "循环走步遇怪 " + step, delegate(uint sequence)
+                    {
+                        return TianshuRunLoopProtocol.BuildMovement(epoch, mapId, (ushort)point.X, (ushort)point.Y, sequence);
+                    });
                 }
             }
-            if (mapId <= 0) { Fail(expectedGeneration, "尚未取得当前地图 ID，无法安全构造走步包。"); return; }
-            long epoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-            SendPacket(expectedGeneration, "走步遇怪 " + (step + 1) + "/10", delegate(uint sequence)
-            {
-                return TianshuRunLoopProtocol.BuildMovement(epoch, mapId, x, y, sequence);
-            });
+            if (stuck) RecoverFromStuckHunt(expectedGeneration);
         }
 
         private void SendRecovery(int expectedGeneration)
@@ -1192,19 +1700,38 @@ namespace TianshuQitanLauncher.Protocol
             SendPacket(expectedGeneration, "战斗一键恢复 HP/MP", TianshuRunLoopProtocol.BuildOneKeyRecovery);
         }
 
-        private void ResumeWalkingAfterTimeout(int expectedGeneration)
+        private void RecoverFromStuckHunt(int expectedGeneration)
         {
+            RunLoopTask task;
+            int retries;
             lock (syncRoot)
             {
-                if (!IsCurrentLocked(expectedGeneration) || state != RunLoopAutomationState.WaitingForCombatResult) return;
-                state = RunLoopAutomationState.WalkingForEncounter;
-                walkStep = 0;
-                DisposeStageTimerLocked();
-                if (walkTimer != null) walkTimer.Dispose();
-                walkTimer = new System.Threading.Timer(delegate { SendWalkStep(expectedGeneration); }, null, 100, 500);
+                if (!IsCurrentLocked(expectedGeneration)) return;
+                task = latestTask == null ? null : latestTask.Clone();
+                retries = huntRetryCount;
+                huntProgressWatch.Restart();
+                DisposeCombatTimersLocked();
+                state = RunLoopAutomationState.WaitingForTask;
             }
-            Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter,
-                "本轮尚未收到任务完成进度，继续下一次 5 秒走步。", false);
+            if (task == null || task.Kind != RunLoopTaskKind.Hunt)
+            {
+                Fail(expectedGeneration, "战斗长时间未遇怪，且没有可继续的战斗任务，自动停止。");
+                return;
+            }
+            if (retries >= walkOptions.MaximumHuntRetries)
+            {
+                Fail(expectedGeneration, "第 " + task.RingNumber + " 环战斗长时间未遇怪，已重新到图 " +
+                    walkOptions.MaximumHuntRetries + " 次仍未触发，自动停止。");
+                return;
+            }
+            lock (syncRoot)
+            {
+                if (!IsCurrentLocked(expectedGeneration)) return;
+                huntRetryCount = retries + 1;
+            }
+            Publish(expectedGeneration, RunLoopAutomationState.WaitingForTask,
+                "第 " + task.RingNumber + " 环战斗长时间未遇怪，重新到图重试 " + (retries + 1) + "/" + walkOptions.MaximumHuntRetries + "。", false);
+            DispatchTask(expectedGeneration, task);
         }
 
         private bool TryResolveNpc(RunLoopTask task, out BountyTravelTarget target)
@@ -1221,33 +1748,63 @@ namespace TianshuQitanLauncher.Protocol
                 };
                 return true;
             }
-            catalogReady.WaitOne(2000);
-            string key = TianshuRunLoopProtocol.NormalizeName(task.TurnInNpcName);
-            lock (syncRoot)
+            string name = TianshuRunLoopProtocol.NormalizeName(task.TurnInNpcName);
+            int mapId;
+            bool hasMapId = TryResolveMapId(task.TurnInMapName, out mapId);
+            lock (syncRoot) TryFindNpcLocked(name, hasMapId ? mapId : 0, out target);
+            if (target == null)
             {
-                BountyTravelTarget found;
-                if (npcDirectory.TryGetValue(key, out found))
-                {
-                    target = found.Clone();
-                }
-                else
-                {
-                    foreach (KeyValuePair<string, BountyTravelTarget> pair in npcDirectory)
-                    {
-                        if (pair.Key.EndsWith(key, StringComparison.Ordinal) || key.EndsWith(pair.Key, StringComparison.Ordinal))
-                        {
-                            target = pair.Value.Clone();
-                            break;
-                        }
-                    }
-                }
+                catalogReady.WaitOne(2000);
+                lock (syncRoot) TryFindNpcLocked(name, hasMapId ? mapId : 0, out target);
             }
             if (target == null) return false;
             target.X = task.TurnInX;
             target.Y = task.TurnInY;
-            int mapId;
-            if (TryResolveMapId(task.TurnInMapName, out mapId)) target.MapId = mapId;
+            if (hasMapId) target.MapId = mapId;
             return target.MapId > 0;
+        }
+
+        private bool TryFindNpcLocked(string name, int mapId, out BountyTravelTarget target)
+        {
+            target = null;
+            if (mapId > 0)
+            {
+                BountyTravelTarget exact;
+                if (npcDirectory.TryGetValue(BuildNpcKey(name, mapId), out exact))
+                {
+                    target = exact.Clone();
+                    return true;
+                }
+                foreach (KeyValuePair<string, BountyTravelTarget> pair in npcDirectory)
+                {
+                    if (pair.Value.MapId != mapId) continue;
+                    string keyName = GetNameFromNpcKey(pair.Key);
+                    if (string.Equals(keyName, name, StringComparison.Ordinal) ||
+                        keyName.EndsWith(name, StringComparison.Ordinal) || name.EndsWith(keyName, StringComparison.Ordinal))
+                    {
+                        target = pair.Value.Clone();
+                        return true;
+                    }
+                }
+            }
+            foreach (KeyValuePair<string, BountyTravelTarget> pair in npcDirectory)
+            {
+                string keyName = GetNameFromNpcKey(pair.Key);
+                if (string.Equals(keyName, name, StringComparison.Ordinal) ||
+                    keyName.EndsWith(name, StringComparison.Ordinal) || name.EndsWith(keyName, StringComparison.Ordinal))
+                {
+                    target = pair.Value.Clone();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static string GetNameFromNpcKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return string.Empty;
+            int separator = key.LastIndexOf('|');
+            return separator < 0 ? key : key.Substring(0, separator);
         }
 
         private static bool TryBuildHuntRoute(string mapName, out List<BountyTravelTarget> targets)
@@ -1299,7 +1856,8 @@ namespace TianshuQitanLauncher.Protocol
                 { "黄金港口", 15 }, { "明湖水寨", 66 }, { "尚其村", 72 }, { "坠龙城", 76 },
                 { "三界关", 86 }, { "灵昌广场", 97 }, { "焚石山", 99 }, { "怒焰祭坛", 100 },
                 { "十字路口", 101 }, { "逐浪广场", 102 }, { "主母之林", 109 },
-                { "近天回廊", 110 }, { "百鸟树林", 111 }, { "练功房", 213 }, { "帮会大厅", 1058 }
+                { "近天回廊", 110 }, { "百鸟树林", 111 }, { "练功房", 213 }, { "帮会大厅", 1058 },
+                { "新月村", 3 }, { "新月村城镇", 3 }
             };
             return maps.TryGetValue(normalized, out mapId);
         }
@@ -1313,7 +1871,7 @@ namespace TianshuQitanLauncher.Protocol
                 for (int i = 0; i < entities.Count; i++)
                 {
                     RunLoopEntity entity = entities[i];
-                    npcDirectory[TianshuRunLoopProtocol.NormalizeName(entity.Name)] = new BountyTravelTarget
+                    npcDirectory[BuildNpcKey(entity.Name, currentMapId)] = new BountyTravelTarget
                     {
                         NpcId = entity.Id,
                         MapId = currentMapId,
@@ -1321,6 +1879,20 @@ namespace TianshuQitanLauncher.Protocol
                         Y = entity.Y
                     };
                 }
+            }
+        }
+
+        private void HandleMapData(byte[] bytes)
+        {
+            RunLoopMapGrid grid;
+            if (!TianshuRunLoopProtocol.TryParseMapData(bytes, out grid)) return;
+            lock (syncRoot)
+            {
+                if (disposed) return;
+                if (grid.MapId != currentMapId) return;
+                currentMapGrid = grid;
+                patrolPath = null;
+                mapDataWaitWatch.Restart();
             }
         }
 
@@ -1499,10 +2071,6 @@ namespace TianshuQitanLauncher.Protocol
                 opcode == TianshuRunLoopProtocol.ClientMovement || opcode == TianshuRunLoopProtocol.ClientUiAction || opcode == 0x0042;
         }
 
-        private static ushort ClampCoordinate(int value)
-        {
-            return (ushort)Math.Max(16, Math.Min(UInt16.MaxValue - 16, value));
-        }
     }
 
     public sealed class RunLoopAutomationControl : UserControl
@@ -1511,6 +2079,7 @@ namespace TianshuQitanLauncher.Protocol
         private readonly NumericUpDown rounds;
         private readonly CheckBox automaticRecovery;
         private readonly Button startButton;
+        private readonly Button resumeButton;
         private readonly Button stopButton;
         private readonly Label stateLabel;
         private readonly Label progressLabel;
@@ -1527,21 +2096,23 @@ namespace TianshuQitanLauncher.Protocol
                 AutoSize = false,
                 Height = 44,
                 Dock = DockStyle.Top,
-                Text = "自动解析跑环任务及 Base64 HTML 链接：提交道具时读取 event 中的 NPC/地图/坐标并瞬移访问；战斗地图优先用已录制蟠龙图腾的旧任务链接到图，再走步约 5 秒遇怪。每轮 20 环，每日最多 4 轮。"
+                Text = "支持提交道具、NPC 对话和战斗。每轮 20 环，交付第 20 环后自动返回柳先元重新接取；本次最多 6 轮 / 120 环，服务端次数用尽时停止。"
             };
             FlowLayoutPanel options = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 38, AutoSize = false };
             options.Controls.Add(new Label { Text = "本次轮数", AutoSize = true, Margin = new Padding(3, 9, 3, 3) });
-            rounds = new NumericUpDown { Minimum = 1, Maximum = 4, Value = 4, Width = 55 };
+            rounds = new NumericUpDown { Minimum = 1, Maximum = RunLoopAutomationCoordinator.MaximumPlannedRounds, Value = 6, Width = 55 };
             options.Controls.Add(rounds);
-            automaticRecovery = new CheckBox { Text = "战斗每 4 秒恢复 HP/MP", Checked = true, AutoSize = true, Margin = new Padding(10, 7, 3, 3) };
+            automaticRecovery = new CheckBox { Text = "战斗自动恢复 HP/MP", Checked = true, AutoSize = true, Margin = new Padding(10, 7, 3, 3) };
             options.Controls.Add(automaticRecovery);
             startButton = new Button { Text = "开始自动跑环", AutoSize = true };
+            resumeButton = new Button { Text = "从当前环继续", AutoSize = true };
             stopButton = new Button { Text = "停止", AutoSize = true, Enabled = false };
             options.Controls.Add(startButton);
+            options.Controls.Add(resumeButton);
             options.Controls.Add(stopButton);
 
             stateLabel = new Label { Dock = DockStyle.Top, Height = 23, Text = "状态：Inactive" };
-            progressLabel = new Label { Dock = DockStyle.Top, Height = 23, Text = "进度：0/4 轮，0 环" };
+            progressLabel = new Label { Dock = DockStyle.Top, Height = 23, Text = "进度：0/6 轮，0 环" };
             taskLabel = new Label { Dock = DockStyle.Top, Height = 44, AutoEllipsis = true, Text = "当前任务：等待服务端任务包" };
             Controls.Add(taskLabel);
             Controls.Add(progressLabel);
@@ -1550,6 +2121,7 @@ namespace TianshuQitanLauncher.Protocol
             Controls.Add(help);
 
             startButton.Click += OnStart;
+            resumeButton.Click += OnResume;
             stopButton.Click += delegate { coordinator.Stop(); };
             coordinator.StatusChanged += OnStatusChanged;
             OnStatusChanged(coordinator.State, "自动跑环尚未启动。");
@@ -1567,6 +2139,12 @@ namespace TianshuQitanLauncher.Protocol
             catch (Exception ex) { MessageBox.Show(this, ex.Message, "自动跑环", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         }
 
+        private void OnResume(object sender, EventArgs e)
+        {
+            try { coordinator.Resume((int)rounds.Value, automaticRecovery.Checked); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, "继续跑环", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        }
+
         private void OnStatusChanged(RunLoopAutomationState automationState, string message)
         {
             if (InvokeRequired)
@@ -1578,14 +2156,14 @@ namespace TianshuQitanLauncher.Protocol
             bool running = automationState != RunLoopAutomationState.Inactive && automationState != RunLoopAutomationState.Completed &&
                 automationState != RunLoopAutomationState.Stopped && automationState != RunLoopAutomationState.Failed;
             startButton.Enabled = !running;
+            resumeButton.Enabled = !running;
             stopButton.Enabled = running;
             rounds.Enabled = !running;
             automaticRecovery.Enabled = !running;
             stateLabel.Text = "状态：" + automationState;
             progressLabel.Text = "进度：" + coordinator.CompletedRounds + "/" + coordinator.PlannedRounds +
                 " 轮，已处理 " + coordinator.CompletedRings + " 环";
-            RunLoopTask task = coordinator.CurrentTask;
-            taskLabel.Text = "当前任务：" + (task == null ? "等待服务端任务包" : task.ToString());
+            taskLabel.Text = "当前任务：" + coordinator.DescribeCurrentTaskAction();
         }
     }
 }

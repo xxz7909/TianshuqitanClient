@@ -72,6 +72,7 @@
     <Compile Include="src\Protocol\BountyAutomation.cs" />
     <Compile Include="src\Protocol\DonationAutomation.cs" />
     <Compile Include="src\Protocol\MapTeleportAutomation.cs" />
+    <Compile Include="src\Protocol\NpcCatalogHarvester.cs" />
     <Compile Include="src\Protocol\MountainClimbAutomation.cs" />
     <Compile Include="src\Protocol\RunLoopAutomation.cs" />
     <Compile Include="src\Protocol\HexCodec.cs" />

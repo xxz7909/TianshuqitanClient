@@ -36,6 +36,7 @@ namespace TianshuQitanLauncher
         private readonly RunLoopAutomationCoordinator runLoopAutomation;
         private readonly MountainClimbAutomationCoordinator mountainClimbAutomation;
         private readonly MapTeleportAutomationCoordinator mapTeleportAutomation;
+        private readonly NpcCatalogHarvesterCoordinator npcCatalogHarvester;
         private readonly AudioFilterProxy audioFilterProxy;
         private readonly ClientLogHub clientLogHub;
         private Rectangle previousBounds;
@@ -114,6 +115,7 @@ namespace TianshuQitanLauncher
             RunLoopAutomationCoordinator loadedRunLoopAutomation = null;
             MountainClimbAutomationCoordinator loadedMountainClimbAutomation = null;
             MapTeleportAutomationCoordinator loadedMapTeleportAutomation = null;
+            NpcCatalogHarvesterCoordinator loadedNpcCatalogHarvester = null;
             AudioFilterProxy loadedAudioFilterProxy = null;
             MultiAccountManager loadedMultiAccountManager = null;
             ClientLogHub loadedClientLogHub = new ClientLogHub(ClientLogHub.DefaultCapacity);
@@ -161,6 +163,7 @@ namespace TianshuQitanLauncher
                 loadedRunLoopAutomation = new RunLoopAutomationCoordinator(loadedService);
                 loadedMountainClimbAutomation = new MountainClimbAutomationCoordinator(loadedService);
                 loadedMapTeleportAutomation = new MapTeleportAutomationCoordinator(loadedService);
+                loadedNpcCatalogHarvester = new NpcCatalogHarvesterCoordinator(loadedService);
                 if (instanceContext != null && accountStore != null)
                 {
                     loadedMultiAccountManager = new MultiAccountManager(
@@ -172,8 +175,8 @@ namespace TianshuQitanLauncher
                 }
                 loadedControl = new ProtocolWorkbenchControl(
                     loadedService, loadedLoginAutomation, loadedAudioFilterProxy, loadedBountyAutomation, loadedDonationAutomation,
-                    loadedRunLoopAutomation, loadedMountainClimbAutomation, loadedMapTeleportAutomation, loadedMultiAccountManager,
-                    loadedClientLogHub);
+                    loadedRunLoopAutomation, loadedMountainClimbAutomation, loadedMapTeleportAutomation,
+                    loadedNpcCatalogHarvester, loadedMultiAccountManager, loadedClientLogHub);
                 mainSplit.Panel2.Controls.Add(loadedControl);
             }
             catch (Exception ex)
@@ -183,6 +186,7 @@ namespace TianshuQitanLauncher
                 if (loadedRunLoopAutomation != null) loadedRunLoopAutomation.Dispose();
                 if (loadedMountainClimbAutomation != null) loadedMountainClimbAutomation.Dispose();
                 if (loadedMapTeleportAutomation != null) loadedMapTeleportAutomation.Dispose();
+                if (loadedNpcCatalogHarvester != null) loadedNpcCatalogHarvester.Dispose();
                 if (loadedLoginAutomation != null) loadedLoginAutomation.Dispose();
                 Logger.Error("Cannot initialize protocol workbench", ex);
                 Label errorLabel = new Label();
@@ -201,6 +205,7 @@ namespace TianshuQitanLauncher
             runLoopAutomation = loadedRunLoopAutomation;
             mountainClimbAutomation = loadedMountainClimbAutomation;
             mapTeleportAutomation = loadedMapTeleportAutomation;
+            npcCatalogHarvester = loadedNpcCatalogHarvester;
             audioFilterProxy = loadedAudioFilterProxy;
             multiAccountManager = loadedMultiAccountManager;
             clientLogHub = loadedClientLogHub;
@@ -267,6 +272,10 @@ namespace TianshuQitanLauncher
             if (mapTeleportAutomation != null)
             {
                 mapTeleportAutomation.Dispose();
+            }
+            if (npcCatalogHarvester != null)
+            {
+                npcCatalogHarvester.Dispose();
             }
             if (workbenchService != null)
             {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Data.SQLite;
 using System.Diagnostics;
 using System.IO;
@@ -37,6 +38,8 @@ namespace TianshuQitanLauncher.Tests
                 Run("Bounty protocol parsing and packet builders", TestBountyProtocol);
                 Run("Donation protocol parsing and packet builders", TestDonationProtocol);
                 Run("Run-loop protocol parsing and packet builders", TestRunLoopProtocol);
+                Run("Run-loop fixed walkable patrol and 250ms packet cadence", delegate { TestRunLoopPatrol(root); });
+                Run("Run-loop 120-ring reaccept and stale-cache regression", delegate { TestRunLoopRounds(root); });
                 Run("Mountain-climb protocol parsing and packet builders", TestMountainClimbProtocol);
                 Run("Map-teleport protocol and recorded destination catalog", TestMapTeleportProtocol);
                 Run("Unified client logging and fixed GUI", delegate { TestClientLogging(root); });
@@ -56,6 +59,9 @@ namespace TianshuQitanLauncher.Tests
                 string runLoopRecording = Environment.GetEnvironmentVariable("TIANSHU_RUN_LOOP_SAMPLE");
                 if (!string.IsNullOrWhiteSpace(runLoopRecording))
                     Run("Recorded run-loop SQLite replay", delegate { TestRecordedRunLoop(runLoopRecording); });
+                string runLoopDemonstrationRecording = Environment.GetEnvironmentVariable("TIANSHU_RUN_LOOP_DEMO_SAMPLE");
+                if (!string.IsNullOrWhiteSpace(runLoopDemonstrationRecording))
+                    Run("Recorded run-loop demonstration SQLite replay", delegate { TestRecordedRunLoopDemonstration(runLoopDemonstrationRecording); });
                 string mountainClimbRecording = Environment.GetEnvironmentVariable("TIANSHU_MOUNTAIN_CLIMB_SAMPLE");
                 if (!string.IsNullOrWhiteSpace(mountainClimbRecording))
                     Run("Recorded mountain-climb SQLite replay", delegate { TestRecordedMountainClimb(mountainClimbRecording); });
@@ -249,8 +255,231 @@ namespace TianshuQitanLauncher.Tests
                 TianshuBountyProtocol.ServerSystemMessage, "你还没有放入物品呢！")), "empty donation container message");
         }
 
+        private sealed class RunLoopTestTransport : ITransportCaptureEngine
+        {
+            public readonly BlockingCollection<byte[]> Sent = new BlockingCollection<byte[]>();
+            public bool IsRunning { get; private set; }
+            public void Start() { IsRunning = true; }
+            public void Stop() { IsRunning = false; }
+            public bool Send(long connectionId, byte[] bytes) { Sent.Add(bytes); return true; }
+            public bool InjectReceive(long connectionId, byte[] bytes) { return false; }
+            public void Dispose() { Stop(); Sent.Dispose(); }
+
+            public byte[] Take(int opcode)
+            {
+                byte[] bytes;
+                Assert(Sent.TryTake(out bytes, 5000), "automation must send opcode " + opcode.ToString("X4"));
+                Assert(TianshuBountyProtocol.HasOpcode(bytes, opcode), "unexpected automation packet: " + HexCodec.Format(bytes));
+                return bytes;
+            }
+        }
+
+        private static void FeedRunLoopFrame(ProtocolWorkbenchService service, byte[] bytes, TrafficDirection direction)
+        {
+            service.RecordChunk(new TransportChunk
+            {
+                ConnectionId = 1, TimestampUtc = DateTime.UtcNow, Direction = direction,
+                Operation = direction == TrafficDirection.ServerToClient ? TransportOperation.Receive : TransportOperation.Send,
+                OriginalBytes = bytes, EffectiveBytes = bytes, NativeResult = bytes.Length
+            });
+        }
+
+        private static void CompleteRunLoopNpcVisit(ProtocolWorkbenchService service, RunLoopTestTransport transport,
+            int mapId, int npcId, string functionId)
+        {
+            byte[] travel = transport.Take(TianshuBountyProtocol.ClientTravelLink);
+            Assert(Encoding.UTF8.GetString(travel).Contains(npcId.ToString()), "travel targets the expected NPC");
+            byte[] map;
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, 0x55 }, 0, 4);
+                WriteUInt32BigEndian(stream, (uint)mapId);
+                WriteUtf8String(stream, mapId == 72 ? "尚其村" : "皇城内");
+                WriteUInt32BigEndian(stream, 32);
+                WriteUInt32BigEndian(stream, 32);
+                map = stream.ToArray();
+                map[0] = (byte)(map.Length >> 8);
+                map[1] = (byte)map.Length;
+            }
+            FeedRunLoopFrame(service, map, TrafficDirection.ServerToClient);
+            byte[] open = transport.Take(TianshuBountyProtocol.ClientNpcOpen);
+            uint sequence;
+            TianshuBountyProtocol.TryReadClientSequence(open, out sequence);
+            AssertEqual(HexCodec.Format(TianshuBountyProtocol.BuildNpcOpen(npcId, sequence)), HexCodec.Format(open),
+                "open expected NPC");
+            FeedRunLoopFrame(service, BuildNpcDialogFrame(npcId, "任务 NPC", "跑环任务", functionId), TrafficDirection.ServerToClient);
+            byte[] select = transport.Take(TianshuBountyProtocol.ClientNpcFunction);
+            TianshuBountyProtocol.TryReadClientSequence(select, out sequence);
+            AssertEqual(HexCodec.Format(TianshuBountyProtocol.BuildNpcFunction(npcId, functionId, sequence)),
+                HexCodec.Format(select), "select expected accept/turn-in function");
+        }
+
+        private static ProtocolWorkbenchService CreateRunLoopTestService(string directory)
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "protocol.json"), JsonConvert.SerializeObject(CreateLengthPrefixDefinition()));
+            File.WriteAllText(Path.Combine(directory, "rules.json"), JsonConvert.SerializeObject(new RuleSetDocument()));
+            File.WriteAllText(Path.Combine(directory, "packet.lua"), "function on_frame(ctx) return nil end\n");
+            string profile = Path.Combine(directory, "profile.json");
+            File.WriteAllText(profile, JsonConvert.SerializeObject(new
+            {
+                name = "run-loop-rounds", gameUrl = "about:blank", activeMode = false,
+                captureDirectory = "sessions", protocolPath = "protocol.json", rulesPath = "rules.json",
+                packetScriptPath = "packet.lua", operationsPath = "operations.json",
+                captureQueueCapacity = 8192, proxyPorts = new int[0], policyPorts = new int[0]
+            }));
+            return new ProtocolWorkbenchService(WorkbenchProfile.Load(profile, directory));
+        }
+
+        private static void TestRunLoopPatrol(string root)
+        {
+            byte[] cells = new byte[25];
+            for (int col = 0; col < 4; col++) cells[2 * 5 + col] = 1;
+            RunLoopMapGrid grid = new RunLoopMapGrid
+            {
+                MapId = 95, RpWidth = 64, RpHeight = 32, Cols = 5, Rows = 5, Cells = cells
+            };
+            RunLoopPatrolPath path;
+            Assert(RunLoopPatrolPath.TryCreate(grid, 0, 32, 4, out path), "four connected walkable points found");
+            AssertEqual(4, path.Points.Count, "bounded patrol point count");
+            int[] expectedX = { 64, 128, 192, 128, 64, 0, 64, 128, 192, 128, 64, 0 };
+            foreach (int x in expectedX)
+                AssertEqual(new System.Drawing.Point(x, 32), path.Next(), "patrol reverses at endpoints without drift");
+            Assert(RunLoopPatrolPath.TryCreate(grid, 0, 32, 2, out path), "configurable two-point patrol");
+            for (int i = 0; i < 10; i++)
+                AssertEqual(i % 2 == 0 ? 64 : 0, path.Next().X, "two-point patrol alternates");
+            cells[2 * 5 + 1] = 0;
+            Assert(!RunLoopPatrolPath.TryCreate(grid, 0, 32, 4, out path), "isolated anchor never jumps across blocked cells");
+            Assert(!RunLoopPatrolPath.TryCreate(null, 0, 32, 4, out path), "missing map data produces no guessed path");
+            cells[2 * 5 + 1] = 1;
+
+            using (ProtocolWorkbenchService service = CreateRunLoopTestService(Path.Combine(root, "run-loop-patrol")))
+            {
+                RunLoopTestTransport transport = new RunLoopTestTransport();
+                service.AttachCaptureEngine(transport);
+                using (RunLoopAutomationCoordinator coordinator = new RunLoopAutomationCoordinator(service))
+                {
+                    service.RecordConnection(new ConnectionSession
+                    {
+                        Id = 1, Kind = ConnectionKind.Game, State = "Connected", OpenedUtc = DateTime.UtcNow,
+                        RemotePort = 12345, RemoteEndPoint = "127.0.0.1:12345"
+                    }, "Connected");
+                    FeedRunLoopFrame(service, TianshuBountyProtocol.BuildNpcOpen(93290, 1), TrafficDirection.ClientToServer);
+                    coordinator.Start(1, false);
+                    CompleteRunLoopNpcVisit(service, transport, 72, 93290, TianshuRunLoopProtocol.AcceptFunctionId);
+                    FeedRunLoopFrame(service, BuildRunLoopTaskFrame(1,
+                        "去祭牙台地消灭5个金翅雏鸟后，到近天回廊的天空远征军斥候武诚初(20,66)处领取下一环任务。",
+                        "金翅雏鸟 (0/5),"), TrafficDirection.ServerToClient);
+                    transport.Take(TianshuBountyProtocol.ClientTravelLink);
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        stream.Write(new byte[] { 0, 0, 0, 0x55 }, 0, 4);
+                        WriteUInt32BigEndian(stream, 95);
+                        WriteUtf8String(stream, "祭牙台地");
+                        WriteUInt32BigEndian(stream, 0);
+                        WriteUInt32BigEndian(stream, 32);
+                        byte[] map = stream.ToArray();
+                        map[0] = (byte)(map.Length >> 8);
+                        map[1] = (byte)map.Length;
+                        FeedRunLoopFrame(service, map, TrafficDirection.ServerToClient);
+                    }
+                    byte[] unexpected;
+                    Assert(!transport.Sent.TryTake(out unexpected, 350), "no movement before a verified map grid arrives");
+                    FeedRunLoopFrame(service, BuildRunLoopMapDataFrame(95, 64, 32, 5, 5, cells), TrafficDirection.ServerToClient);
+                    long firstTime = 0;
+                    long lastTime = 0;
+                    uint lastSequence = 0;
+                    for (int i = 0; i < expectedX.Length; i++)
+                    {
+                        byte[] packet = transport.Take(TianshuRunLoopProtocol.ClientMovement);
+                        long timestamp;
+                        int mapId;
+                        ushort x;
+                        ushort y;
+                        uint sequence;
+                        Assert(TianshuRunLoopProtocol.TryParseMovement(packet, out timestamp, out mapId, out x, out y), "real timer emits movement packets");
+                        AssertEqual(95, mapId, "movement stays on current map");
+                        AssertEqual((ushort)expectedX[i], x, "sent positions follow fixed patrol");
+                        AssertEqual((ushort)32, y, "patrol remains within valid corridor");
+                        TianshuBountyProtocol.TryReadClientSequence(packet, out sequence);
+                        if (i == 0) firstTime = timestamp;
+                        else Assert(sequence > lastSequence, "live movement sequence advances");
+                        lastSequence = sequence;
+                        lastTime = timestamp;
+                    }
+                    double averageInterval = (lastTime - firstTime) / (double)(expectedX.Length - 1);
+                    Assert(averageInterval >= 180 && averageInterval < 400, "actual packet cadence is approximately 250ms: " + averageInterval);
+                    coordinator.Stop();
+                    while (transport.Sent.TryTake(out unexpected)) { }
+                    Assert(!transport.Sent.TryTake(out unexpected, 350), "stop cancels patrol packets");
+                }
+            }
+        }
+
+        private static void TestRunLoopRounds(string root)
+        {
+            using (ProtocolWorkbenchService service = CreateRunLoopTestService(Path.Combine(root, "run-loop-rounds")))
+            {
+                RunLoopTestTransport transport = new RunLoopTestTransport();
+                service.AttachCaptureEngine(transport);
+                using (RunLoopAutomationCoordinator coordinator = new RunLoopAutomationCoordinator(service))
+                {
+                    service.RecordConnection(new ConnectionSession
+                    {
+                        Id = 1, Kind = ConnectionKind.Game, State = "Connected", OpenedUtc = DateTime.UtcNow,
+                        RemotePort = 12345, RemoteEndPoint = "127.0.0.1:12345"
+                    }, "Connected");
+                    FeedRunLoopFrame(service, TianshuBountyProtocol.BuildNpcOpen(93290, 1), TrafficDirection.ClientToServer);
+                    byte[] removed = BuildServerStringFrame(TianshuRunLoopProtocol.ServerTaskRemoved, TianshuRunLoopProtocol.TaskId);
+                    byte[] unrelated = BuildServerStringFrame(TianshuRunLoopProtocol.ServerTaskRemoved, "another-task");
+                    const string description = "与皇城内的刘兴(64,113)对话，领取下一环任务。";
+
+                    // Manual completion while inactive must invalidate a remembered twentieth ring too.
+                    FeedRunLoopFrame(service, BuildRunLoopTaskFrame(20, description, ""), TrafficDirection.ServerToClient);
+                    FeedRunLoopFrame(service, removed, TrafficDirection.ServerToClient);
+                    FeedRunLoopFrame(service, BuildRunLoopTaskListFrame(20, description, "", "刘兴(64,113)"), TrafficDirection.ServerToClient);
+                    Assert(coordinator.CurrentTask == null, "removed twentieth ring cannot return from task-list cache");
+                    coordinator.Start(6, false);
+                    for (int round = 1; round <= 6; round++)
+                    {
+                        CompleteRunLoopNpcVisit(service, transport, 72, 93290, TianshuRunLoopProtocol.AcceptFunctionId);
+                        for (int ring = 1; ring <= 20; ring++)
+                        {
+                            byte[] current = BuildRunLoopTaskFrame(ring, description, "");
+                            FeedRunLoopFrame(service, ring == 1 && round % 2 == 0
+                                ? BuildRunLoopTaskListFrame(ring, description, "", "刘兴(64,113)") : current,
+                                TrafficDirection.ServerToClient);
+                            CompleteRunLoopNpcVisit(service, transport, 13, 8062, TianshuRunLoopProtocol.TurnInFunctionId);
+                            FeedRunLoopFrame(service, current, TrafficDirection.ServerToClient); // captured order: stale 3E, then 3F
+                            FeedRunLoopFrame(service, unrelated, TrafficDirection.ServerToClient);
+                            AssertEqual((round - 1) * 20 + ring - 1, coordinator.CompletedRings,
+                                "updates and other task removals do not confirm turn-in");
+                            FeedRunLoopFrame(service, removed, TrafficDirection.ServerToClient);
+                            FeedRunLoopFrame(service, removed, TrafficDirection.ServerToClient); // duplicate must be idempotent
+                            FeedRunLoopFrame(service, current, TrafficDirection.ServerToClient);
+                            FeedRunLoopFrame(service, BuildRunLoopTaskListFrame(ring, description, "", "刘兴(64,113)"), TrafficDirection.ServerToClient);
+                            Assert(coordinator.CurrentTask == null, "late task refresh cannot resurrect submitted ring");
+                            AssertEqual((round - 1) * 20 + ring, coordinator.CompletedRings, "confirmed ring count");
+                            AssertEqual(ring == 20 ? round : round - 1, coordinator.CompletedRounds, "round counted at twentieth removal");
+                        }
+                        Console.WriteLine("      Simulated run-loop round " + round + "/6 completed");
+                    }
+                    AssertEqual(RunLoopAutomationState.Completed, coordinator.State, "120 rings terminate without requiring round seven");
+                    AssertEqual(120, coordinator.CompletedRings, "all 120 confirmed turn-ins counted");
+                    AssertEqual(0, transport.Sent.Count, "no seventh accept or stale twentieth turn-in sent");
+                    Assert(!service.ActiveMode, "completion restores ACTIVE mode");
+                }
+            }
+        }
+
         private static void TestRunLoopProtocol()
         {
+            Assert(TianshuRunLoopProtocol.IsRunLoopTaskRemoved(HexCodec.Parse("00 0F 00 3F 00 09 31 34 30 30 30 30 30 30 30")),
+                "captured twentieth-ring removal parser");
+            Assert(!TianshuRunLoopProtocol.IsRunLoopTaskRemoved(BuildServerStringFrame(0x3F, "140000001")),
+                "other task IDs do not remove run-loop cache");
+            Assert(!TianshuRunLoopProtocol.IsRunLoopTaskRemoved(HexCodec.Parse("00 06 00 3F 00 09")),
+                "truncated task removal rejected");
             byte[] movement = HexCodec.Parse("00 18 00 C1 00 00 01 A0 5C 98 8C 08 00 00 00 6F 03 C0 04 20 00 00 00 B7");
             long timestamp;
             int mapId;
@@ -300,6 +529,27 @@ namespace TianshuQitanLauncher.Tests
             AssertEqual(102, encodedDelivery.TurnInMapId, "task-link map id from base64 HTML");
             AssertEqual("海蚌族蚌岳珊", encodedDelivery.TurnInNpcName, "HTML task npc normalization");
 
+            byte[] talkFrame = BuildRunLoopTaskFrame(2,
+                "与十字路口的冯奇(17,73)对话，领取下一环任务。", string.Empty);
+            RunLoopTask talk;
+            Assert(TianshuRunLoopProtocol.TryParseTask(talkFrame, out talk), "recorded talk-to-npc task parser");
+            AssertEqual(RunLoopTaskKind.TalkToNpc, talk.Kind, "recorded talk-to-npc kind");
+            AssertEqual("十字路口", talk.TurnInMapName, "recorded talk-to-npc map");
+            AssertEqual("冯奇", talk.TurnInNpcName, "recorded talk-to-npc name");
+
+            byte[] demonHuntFrame = BuildRunLoopTaskFrame(4,
+                "去祭牙台地消灭5个铁甲蜥蜴（精英）后，到灵昌城的周猎户(31,130)处领取下一环任务。",
+                "铁甲蜥蜴（精英） (0/5),");
+            RunLoopTask demonHunt;
+            Assert(TianshuRunLoopProtocol.TryParseTask(demonHuntFrame, out demonHunt), "recorded demon hunt parser");
+            AssertEqual(RunLoopTaskKind.Hunt, demonHunt.Kind, "recorded demon hunt kind");
+            AssertEqual("祭牙台地", demonHunt.HuntMapName, "recorded demon hunt map");
+            AssertEqual("周猎户", demonHunt.TurnInNpcName, "recorded demon hunt turn-in npc");
+            AssertEqual(31, demonHunt.TurnInX, "recorded demon hunt turn-in x");
+            AssertEqual(130, demonHunt.TurnInY, "recorded demon hunt turn-in y");
+            AssertEqual(0, demonHunt.Progress, "recorded demon hunt initial progress");
+            Assert(!demonHunt.IsComplete, "recorded demon hunt initially incomplete");
+
             byte[] mapFrame;
             using (MemoryStream stream = new MemoryStream())
             {
@@ -316,6 +566,55 @@ namespace TianshuQitanLauncher.Tests
             Assert(TianshuRunLoopProtocol.TryParseMapInfo(mapFrame, out map), "map info parser");
             AssertEqual(100, map.MapId, "map info id");
             AssertEqual((ushort)0x1E0, map.ScaledX, "map info spawn x");
+
+            byte[] taskListFrame = BuildRunLoopTaskListFrame(3, "与新月村的吕仁(17,61)对话，领取下一环任务。", string.Empty, "吕仁(17,61)");
+            RunLoopTask taskFromList;
+            Assert(TianshuRunLoopProtocol.TryParseTaskList(taskListFrame, out taskFromList), "task-list parser");
+            AssertEqual(3, taskFromList.RingNumber, "task-list ring");
+            AssertEqual(RunLoopTaskKind.TalkToNpc, taskFromList.Kind, "task-list kind");
+            AssertEqual("新月村", taskFromList.TurnInMapName, "task-list map");
+            AssertEqual("吕仁", taskFromList.TurnInNpcName, "task-list npc");
+            AssertEqual(0, taskFromList.TurnInNpcId, "task-list npc id not polluted by foreign travel link");
+            AssertEqual(0, taskFromList.TurnInMapId, "task-list map id not polluted by foreign travel link");
+
+            byte[] huntListFrame = BuildRunLoopTaskListFrame(8,
+                "去百鸟树林消灭金翅雏鸟，得到5个冰晶后，到近天回廊的先锋护卫姜天(13,71)处领取下一环任务。",
+                "冰晶 (5/5), ", "先锋护卫姜天(13,71)");
+            RunLoopTask huntFromList;
+            Assert(TianshuRunLoopProtocol.TryParseTaskList(huntListFrame, out huntFromList), "hunt task-list parser");
+            AssertEqual(8, huntFromList.RingNumber, "hunt task-list ring");
+            AssertEqual(RunLoopTaskKind.Hunt, huntFromList.Kind, "hunt task-list kind");
+            AssertEqual("百鸟树林", huntFromList.HuntMapName, "hunt task-list map");
+            AssertEqual("冰晶", huntFromList.ObjectiveName, "hunt task-list objective");
+            AssertEqual(5, huntFromList.Progress, "hunt task-list progress not polluted");
+            AssertEqual(5, huntFromList.Required, "hunt task-list required not polluted");
+
+            byte[] mapCells = new byte[]
+            {
+                0, 1, 0,
+                1, 0, 1,
+                0, 1, 0
+            };
+            byte[] mapDataFrame = BuildRunLoopMapDataFrame(3, 64, 32, 3, 3, mapCells);
+            RunLoopMapGrid grid;
+            Assert(TianshuRunLoopProtocol.TryParseMapData(mapDataFrame, out grid), "map-data parser");
+            AssertEqual(3, grid.MapId, "map-data map id");
+            AssertEqual(64, grid.RpWidth, "map-data rp width");
+            AssertEqual(32, grid.RpHeight, "map-data rp height");
+            AssertEqual(3, grid.Rows, "map-data rows");
+            AssertEqual(3, grid.Cols, "map-data cols");
+            Assert(!grid.IsWalkable(0, 0), "blocked cell is not walkable");
+            Assert(grid.IsWalkable(1, 0), "open cell is walkable");
+            ushort centerX;
+            ushort centerY;
+            Assert(grid.TryGetScaledCenter(1, 0, out centerX, out centerY), "rp-to-scaled conversion");
+            AssertEqual((ushort)64, centerX, "rp center x");
+            AssertEqual((ushort)0, centerY, "rp center y");
+            int rpCol;
+            int rpRow;
+            Assert(grid.TryGetRp(centerX, centerY, out rpCol, out rpRow), "scaled-to-rp conversion");
+            AssertEqual(1, rpCol, "rp col");
+            AssertEqual(0, rpRow, "rp row");
         }
 
         private static void TestMountainClimbProtocol()
@@ -405,10 +704,10 @@ namespace TianshuQitanLauncher.Tests
             AssertEqual(35, flightY, "coordinate-flight y");
             AssertEqual(9U, sequence, "coordinate-flight sequence");
 
-            AssertEqual(42, TianshuMapTeleportCatalog.All.Count, "recorded destination count");
-            AssertEqual(42, TianshuMapTeleportCatalog.All.Select(item => item.MapId).Distinct().Count(),
+            AssertEqual(43, TianshuMapTeleportCatalog.All.Count, "recorded destination count");
+            AssertEqual(43, TianshuMapTeleportCatalog.All.Select(item => item.MapId).Distinct().Count(),
                 "destination ids are unique");
-            AssertEqual(42, TianshuMapTeleportCatalog.All.Select(item => item.MapName).Distinct().Count(),
+            AssertEqual(43, TianshuMapTeleportCatalog.All.Select(item => item.MapName).Distinct().Count(),
                 "destination names are unique");
             MapTeleportDestination destination;
             Assert(TianshuMapTeleportCatalog.TryGet(86, out destination) && destination.MapName == "三界关",
@@ -420,6 +719,13 @@ namespace TianshuQitanLauncher.Tests
                 "destination lookup by name");
             Assert(TianshuMapTeleportCatalog.TryGet(" 102 ", out destination) && destination.MapName == "逐浪广场",
                 "destination lookup by numeric text");
+            Assert(TianshuMapTeleportCatalog.TryGet(3, out destination) && destination.MapName == "新月村",
+                "destination lookup for Xinyue Village");
+            AssertEqual(542, destination.TotemNpcId, "recorded Xinyue Village totem npc id");
+            AssertEqual((ushort)36, destination.TotemX, "recorded Xinyue Village totem x");
+            AssertEqual((ushort)22, destination.TotemY, "recorded Xinyue Village totem y");
+            AssertEqual((ushort)2240, destination.SpawnX, "recorded Xinyue Village spawn x");
+            AssertEqual((ushort)384, destination.SpawnY, "recorded Xinyue Village spawn y");
             Assert(!TianshuMapTeleportCatalog.TryGet(999999, out destination),
                 "unrecorded destination is rejected");
             AssertThrows(delegate { TianshuMapTeleportProtocol.BuildMapAction(999, 86, 1); },
@@ -1075,6 +1381,82 @@ namespace TianshuQitanLauncher.Tests
             }
         }
 
+        private static byte[] BuildRunLoopTaskListFrame(int ring, string description, string tracker, string finishNpc)
+        {
+            byte[] inflated;
+            using (MemoryStream content = new MemoryStream())
+            {
+                content.WriteByte(0);
+                content.WriteByte(2);
+                WriteUtf8String(content, "奇怪的萝卜");
+                WriteUtf8String(content, "<a href='event:x:19,y:115,m:9,n:5008'>出云子</a>");
+                WriteUtf8String(content, "知客蜂 (5/25), ");
+                WriteUtf8String(content, TianshuRunLoopProtocol.TaskId);
+                content.WriteByte(0);
+                content.WriteByte(0);
+                WriteUtf8String(content, "跑环任务");
+                WriteUtf8String(content, "跑环任务（第" + ring + "环）");
+                WriteUtf8String(content, description);
+                WriteUtf8String(content, tracker);
+                WriteUtf8String(content, finishNpc);
+                inflated = content.ToArray();
+            }
+
+            byte[] deflated;
+            using (MemoryStream compressed = new MemoryStream())
+            {
+                using (DeflateStream deflate = new DeflateStream(compressed, CompressionMode.Compress, true))
+                    deflate.Write(inflated, 0, inflated.Length);
+                deflated = compressed.ToArray();
+            }
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, (byte)TianshuRunLoopProtocol.ServerTaskList }, 0, 4);
+                int compressedLength = deflated.Length + 2;
+                stream.WriteByte((byte)(compressedLength >> 8));
+                stream.WriteByte((byte)compressedLength);
+                stream.WriteByte(0x78);
+                stream.WriteByte(0x9C);
+                stream.Write(deflated, 0, deflated.Length);
+                byte[] frame = stream.ToArray();
+                frame[0] = (byte)(frame.Length >> 8);
+                frame[1] = (byte)frame.Length;
+                return frame;
+            }
+        }
+
+        private static byte[] BuildRunLoopMapDataFrame(int mapId, int rpWidth, int rpHeight, int rows, int cols, byte[] cells)
+        {
+            byte[] deflated;
+            using (MemoryStream compressed = new MemoryStream())
+            {
+                using (DeflateStream deflate = new DeflateStream(compressed, CompressionMode.Compress, true))
+                    deflate.Write(cells, 0, cells.Length);
+                deflated = compressed.ToArray();
+            }
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, (byte)TianshuRunLoopProtocol.ServerMapData2 }, 0, 4);
+                WriteUInt16BigEndian(stream, (ushort)mapId);
+                WriteUtf8String(stream, "新月村");
+                int[] shorts = { 180, 200, 150, rows, cols, rpWidth, rpHeight, rows, cols };
+                for (int i = 0; i < shorts.Length; i++) WriteUInt16BigEndian(stream, (ushort)shorts[i]);
+                WriteUInt32BigEndian(stream, 0);
+                WriteUInt16BigEndian(stream, 0);
+                int compressedLength = deflated.Length + 2;
+                WriteUInt32BigEndian(stream, (uint)compressedLength);
+                stream.WriteByte(0x78);
+                stream.WriteByte(0x9C);
+                stream.Write(deflated, 0, deflated.Length);
+                byte[] frame = stream.ToArray();
+                frame[0] = (byte)(frame.Length >> 8);
+                frame[1] = (byte)frame.Length;
+                return frame;
+            }
+        }
+
         private static void TestRecordedRunLoop(string path)
         {
             Assert(File.Exists(path), "recorded run-loop database exists");
@@ -1151,6 +1533,84 @@ namespace TianshuQitanLauncher.Tests
             Assert(turnInFunctions >= 3, "recording contains repeated turn-in function");
             Assert(ringTwenty && wrappedToOne, "recording proves 20-ring round boundary");
             Assert(learnedEntities >= 10 && learnedJiangTian, "runtime entity table learns NPC name/id mappings");
+        }
+
+        private static void TestRecordedRunLoopDemonstration(string path)
+        {
+            Assert(File.Exists(path), "recorded run-loop demonstration database exists");
+            int parsedTasks = 0;
+            int talkTasks = 0;
+            int huntTasks = 0;
+            int travelLinks = 0;
+            int learnedEntities = 0;
+            bool learnedFengQi = false;
+            bool learnedZhouHu = false;
+            bool learnedWuXiuLuo = false;
+            bool sawMap101 = false;
+            bool sawMap13 = false;
+            using (SQLiteConnection connection = new SQLiteConnection("Data Source=" + path + ";Version=3;Read Only=True;"))
+            {
+                connection.Open();
+                using (SQLiteCommand command = connection.CreateCommand())
+                {
+                    command.CommandText = "SELECT direction,opcode,bytes FROM frames ORDER BY capture_ordinal;";
+                    using (SQLiteDataReader reader = command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            int direction = Convert.ToInt32(reader[0]);
+                            int opcode = Convert.ToInt32(reader[1]);
+                            byte[] bytes = (byte[])reader[2];
+                            if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuRunLoopProtocol.ServerTaskUpdate)
+                            {
+                                RunLoopTask task;
+                                if (!TianshuRunLoopProtocol.TryParseTask(bytes, out task)) continue;
+                                parsedTasks++;
+                                if (task.Kind == RunLoopTaskKind.TalkToNpc) talkTasks++;
+                                if (task.Kind == RunLoopTaskKind.Hunt) huntTasks++;
+                            }
+                            else if (direction == (int)TrafficDirection.ClientToServer &&
+                                opcode == TianshuBountyProtocol.ClientTravelLink)
+                            {
+                                travelLinks++;
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                opcode == TianshuRunLoopProtocol.ServerMapInfo)
+                            {
+                                RunLoopMapInfo map;
+                                if (TianshuRunLoopProtocol.TryParseMapInfo(bytes, out map))
+                                {
+                                    if (map.MapId == 101) sawMap101 = true;
+                                    if (map.MapId == 13) sawMap13 = true;
+                                }
+                            }
+                            else if (direction == (int)TrafficDirection.ServerToClient &&
+                                (opcode == TianshuRunLoopProtocol.ServerEntityList ||
+                                opcode == TianshuRunLoopProtocol.ServerNearbyEntities))
+                            {
+                                IList<RunLoopEntity> entities = TianshuRunLoopProtocol.ExtractEntities(bytes);
+                                learnedEntities += entities.Count;
+                                for (int i = 0; i < entities.Count; i++)
+                                {
+                                    RunLoopEntity entity = entities[i];
+                                    if (entity.Id == 10102 && entity.Name == "冯奇") learnedFengQi = true;
+                                    if (entity.Id == 8032 && entity.Name == "周猎户") learnedZhouHu = true;
+                                    if (entity.Id == 8011 && entity.Name == "舞修罗") learnedWuXiuLuo = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Assert(parsedTasks >= 3, "demonstration recording contains three parsed run-loop task updates");
+            Assert(talkTasks >= 2, "demonstration recording contains two talk-to-npc tasks");
+            Assert(huntTasks >= 1, "demonstration recording contains one hunt task");
+            Assert(travelLinks >= 4, "demonstration recording contains task-link travel requests");
+            Assert(sawMap101 && sawMap13, "demonstration recording contains expected turn-in maps");
+            Assert(learnedEntities >= 20, "demonstration recording contains map entity tables");
+            Assert(learnedFengQi && learnedZhouHu && learnedWuXiuLuo,
+                "demonstration recording learns run-loop turn-in NPC ids");
         }
 
         private static byte[] BuildInventoryUpdateFrame(ushort bag, ushort slot, ushort count, string name, string templateId)
@@ -1533,6 +1993,12 @@ namespace TianshuQitanLauncher.Tests
         {
             stream.WriteByte((byte)(value >> 24));
             stream.WriteByte((byte)(value >> 16));
+            stream.WriteByte((byte)(value >> 8));
+            stream.WriteByte((byte)value);
+        }
+
+        private static void WriteUInt16BigEndian(Stream stream, ushort value)
+        {
             stream.WriteByte((byte)(value >> 8));
             stream.WriteByte((byte)value);
         }
