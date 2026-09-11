@@ -75,6 +75,7 @@
     <Compile Include="src\Protocol\NpcCatalogHarvester.cs" />
     <Compile Include="src\Protocol\MountainClimbAutomation.cs" />
     <Compile Include="src\Protocol\RunLoopAutomation.cs" />
+    <Compile Include="src\Protocol\AutomaticCombat.cs" />
     <Compile Include="src\Protocol\HexCodec.cs" />
     <Compile Include="src\Protocol\LuaScenarioHost.cs" />
     <Compile Include="src\Protocol\OfflineReplayEngine.cs" />

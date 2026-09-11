@@ -28,6 +28,7 @@ namespace TianshuQitanLauncher.Protocol
         private readonly List<StateTransition> confirmedTransitions = new List<StateTransition>();
         private readonly Dictionary<long, ConnectionSession> connections = new Dictionary<long, ConnectionSession>();
         private readonly ToolStripButton activeButton;
+        private readonly ToolStripButton captureButton;
         private readonly ToolStripButton operationButton;
         private readonly ToolStripButton operationStartStopButton;
         private readonly ToolStripButton audioFilterButton;
@@ -164,6 +165,14 @@ namespace TianshuQitanLauncher.Protocol
 
             ToolStrip toolStrip = new ToolStrip();
             toolStrip.GripStyle = ToolStripGripStyle.Hidden;
+            captureButton = new ToolStripButton();
+            captureButton.Overflow = ToolStripItemOverflow.Never;
+            captureButton.Click += delegate
+            {
+                try { service.SetPacketCaptureEnabled(!service.PacketCaptureEnabled); }
+                catch (Exception ex) { MessageBox.Show(this, ex.Message, "抓包", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            };
+            ApplyCaptureAppearance(service.PacketCaptureEnabled);
             activeButton = new ToolStripButton();
             activeButton.CheckOnClick = true;
             activeButton.Checked = service.ActiveMode;
@@ -239,6 +248,7 @@ namespace TianshuQitanLauncher.Protocol
             };
             databaseLabel.ToolTipText = service.DatabasePath;
 
+            toolStrip.Items.Add(captureButton);
             toolStrip.Items.Add(activeButton);
             if (audioFilterButton != null) toolStrip.Items.Add(audioFilterButton);
             toolStrip.Items.Add(bypassButton);
@@ -376,11 +386,14 @@ namespace TianshuQitanLauncher.Protocol
             }
 
             TabPage runLoopPage = null;
+            TabPage combatPage = null;
             if (runLoopAutomation != null)
             {
                 RunLoopAutomationControl runLoopControl = new RunLoopAutomationControl(runLoopAutomation);
                 runLoopPage = new TabPage("自动跑环");
                 runLoopPage.Controls.Add(runLoopControl);
+                combatPage = new TabPage("自动战斗");
+                combatPage.Controls.Add(new AutomaticCombatControl(runLoopAutomation));
             }
 
             TabPage mountainClimbPage = null;
@@ -451,6 +464,7 @@ namespace TianshuQitanLauncher.Protocol
             if (bountyPage != null) featureTabs.TabPages.Add(bountyPage);
             if (donationPage != null) featureTabs.TabPages.Add(donationPage);
             if (runLoopPage != null) featureTabs.TabPages.Add(runLoopPage);
+            if (combatPage != null) featureTabs.TabPages.Add(combatPage);
             if (mountainClimbPage != null) featureTabs.TabPages.Add(mountainClimbPage);
             if (mapTeleportPage != null) featureTabs.TabPages.Add(mapTeleportPage);
             if (npcCatalogPage != null) featureTabs.TabPages.Add(npcCatalogPage);
@@ -480,8 +494,9 @@ namespace TianshuQitanLauncher.Protocol
             toolStrip.Dock = DockStyle.Top;
 
             service.ConnectionChanged += OnConnectionChanged;
-            service.ChunkCaptured += OnChunkCaptured;
-            service.FrameCaptured += OnFrameCaptured;
+            service.ChunkRecorded += OnChunkCaptured;
+            service.FrameRecorded += OnFrameCaptured;
+            service.PacketCaptureEnabledChanged += OnPacketCaptureEnabledChanged;
             service.StateChanged += OnStateChanged;
             service.EventRaised += OnEventRaised;
             service.ScenarioCompleted += OnScenarioCompleted;
@@ -504,8 +519,9 @@ namespace TianshuQitanLauncher.Protocol
                 refreshTimer.Stop();
                 refreshTimer.Dispose();
                 service.ConnectionChanged -= OnConnectionChanged;
-                service.ChunkCaptured -= OnChunkCaptured;
-                service.FrameCaptured -= OnFrameCaptured;
+                service.ChunkRecorded -= OnChunkCaptured;
+                service.FrameRecorded -= OnFrameCaptured;
+                service.PacketCaptureEnabledChanged -= OnPacketCaptureEnabledChanged;
                 service.StateChanged -= OnStateChanged;
                 service.EventRaised -= OnEventRaised;
                 service.ScenarioCompleted -= OnScenarioCompleted;
@@ -524,6 +540,7 @@ namespace TianshuQitanLauncher.Protocol
             if (bountyAutomation != null) bountyAutomation.StatusChanged += OnBountyAutomationStatusChanged;
             if (donationAutomation != null) donationAutomation.StatusChanged += OnDonationAutomationStatusChanged;
             if (runLoopAutomation != null) runLoopAutomation.StatusChanged += OnRunLoopAutomationStatusChanged;
+            if (runLoopAutomation != null) runLoopAutomation.StandaloneCombatStatusChanged += OnStandaloneCombatStatusChanged;
             if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged += OnMountainClimbAutomationStatusChanged;
             if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged += OnMapTeleportAutomationStatusChanged;
             if (npcCatalogHarvester != null) npcCatalogHarvester.StatusChanged += OnNpcCatalogHarvesterStatusChanged;
@@ -541,6 +558,7 @@ namespace TianshuQitanLauncher.Protocol
             if (bountyAutomation != null) bountyAutomation.StatusChanged -= OnBountyAutomationStatusChanged;
             if (donationAutomation != null) donationAutomation.StatusChanged -= OnDonationAutomationStatusChanged;
             if (runLoopAutomation != null) runLoopAutomation.StatusChanged -= OnRunLoopAutomationStatusChanged;
+            if (runLoopAutomation != null) runLoopAutomation.StandaloneCombatStatusChanged -= OnStandaloneCombatStatusChanged;
             if (mountainClimbAutomation != null) mountainClimbAutomation.StatusChanged -= OnMountainClimbAutomationStatusChanged;
             if (mapTeleportAutomation != null) mapTeleportAutomation.StatusChanged -= OnMapTeleportAutomationStatusChanged;
             if (npcCatalogHarvester != null) npcCatalogHarvester.StatusChanged -= OnNpcCatalogHarvesterStatusChanged;
@@ -565,6 +583,11 @@ namespace TianshuQitanLauncher.Protocol
         private void OnRunLoopAutomationStatusChanged(RunLoopAutomationState state, string message)
         {
             PublishAutomationLog("自动跑环", state.ToString(), message);
+        }
+
+        private void OnStandaloneCombatStatusChanged(RunLoopAutomationState state, string message)
+        {
+            PublishAutomationLog("自动战斗", state.ToString(), message);
         }
 
         private void OnMountainClimbAutomationStatusChanged(MountainClimbAutomationState state, string message)
@@ -1110,6 +1133,21 @@ namespace TianshuQitanLauncher.Protocol
                 activeButton.Checked = value;
                 ApplyActiveAppearance(value);
             });
+        }
+
+        private void OnPacketCaptureEnabledChanged(bool enabled)
+        {
+            SafeInvoke(delegate { ApplyCaptureAppearance(enabled); });
+        }
+
+        private void ApplyCaptureAppearance(bool enabled)
+        {
+            captureButton.Text = enabled ? "关闭抓包" : "开启抓包";
+            captureButton.Checked = enabled;
+            captureButton.ForeColor = enabled ? Color.DarkGreen : SystemColors.ControlText;
+            captureButton.ToolTipText = enabled
+                ? "抓包中：点击停止显示和保存新数据包；已有记录保留，正在录制的原子操作会中断。"
+                : "抓包已关闭：点击开始显示并保存数据包。自动登录、自动化和 BGM 过滤继续工作。";
         }
 
         private void OnRefreshTimer(object sender, EventArgs e)

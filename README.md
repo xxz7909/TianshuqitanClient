@@ -83,6 +83,8 @@ Use `会话命名` to append or replace a semantic suffix while preserving the t
 
 抓包 SQLite 按客户端实例保存在 `data/instances/<instance-id>/sessions/`。实际完整路径、文件命名规则、当前路径复制方式，以及“清空显示缓存”与数据库保存之间的关系见 [数据包 SQLite 保存路径说明](docs/capture-sqlite-path.md)。
 
+每次启动默认关闭抓包。点击工作台左上角“开启抓包”开始显示并保存数据包，按钮变为“关闭抓包”；再次点击停止新增记录，已有数据保留，可随时重新开启。网络通信处理继续支持自动登录、自动化和 BGM 过滤。开始原子操作录制会自动开启抓包；关闭抓包会将进行中的原子录制标为中断。关闭抓包不关闭整个会话数据库，运行日志等仍可保存。
+
 “数据包”表格支持 `Ctrl+单击` 离散多选、`Shift+单击` 范围多选、`Ctrl+A` 全选和 `Ctrl+C` 复制选中行。右键菜单可以分别复制选中行、原始/有效 Hex、原始/有效 Hex/ASCII，也可以“清空选中数据包（仅界面）”或“清空全部显示缓存（保留 SQLite）”；两种清空操作都不会删除数据库中的抓包记录，也不会停止继续抓包。
 
 ## Auto login
@@ -106,6 +108,10 @@ The selected line is resolved from each live `SC_GAMESERVER_LIST (0x00C9)` respo
 供其他功能衔接的高层函数是 `MapTeleportAutomationCoordinator.TeleportTo(int mapId)` 和 `TeleportTo(string mapNameOrId)`；已持有自动化锁的状态机可以直接使用 `TianshuMapTeleportProtocol.BuildSelectMap`、`BuildTeleportToMap` 和 `TianshuMapTeleportCatalog`。完整接口、协议字段及 42 张地图目录见 [地图传送基础功能](docs/map-teleport-protocol.md)。
 
 ## 自动跑环
+
+工作台新增“自动战斗”页，默认关闭。进入游戏并移动一次后，点击“开启自动战斗”，即可在当前地图附近按跑环原有路径往返遇怪；可选择自动恢复 HP/MP，再次点击关闭。独立模式使用相同的走步包、实时序号、最多 4 个相连可走点和定时恢复逻辑，不领取或交付跑环任务。缺少可走格超过 10 秒、75 秒未收到战斗提示、切换地图或断开连接时停止；紧急旁路也会停止。
+
+跑环仍自动启用战斗，独立开关不会禁用跑环中的战斗。启动或继续跑环会先停止独立战斗再接管同一套定时器，避免重复发包；跑环结束后独立战斗保持关闭，需手动再次开启。
 
 工作台“自动跑环”页可设置本次 1–6 轮，每轮 20 环，最多 120 环；服务端提示次数用尽时停止。交付第 20 环并收到任务移除确认后，程序清空旧任务缓存，自动返回柳先元重新接取下一轮。程序从实时任务数据解析提交道具、NPC 对话或战斗任务、地图、NPC、坐标及进度；战斗环持续走步遇怪，每 4 秒一键恢复 HP/MP，进度完成后返回 NPC 交付。
 

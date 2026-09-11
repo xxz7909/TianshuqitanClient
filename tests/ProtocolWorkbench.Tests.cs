@@ -39,6 +39,7 @@ namespace TianshuQitanLauncher.Tests
                 Run("Donation protocol parsing and packet builders", TestDonationProtocol);
                 Run("Run-loop protocol parsing and packet builders", TestRunLoopProtocol);
                 Run("Run-loop fixed walkable patrol and 250ms packet cadence", delegate { TestRunLoopPatrol(root); });
+                Run("Standalone combat and run-loop handoff", delegate { TestStandaloneCombat(root); });
                 Run("Run-loop 120-ring reaccept and stale-cache regression", delegate { TestRunLoopRounds(root); });
                 Run("Mountain-climb protocol parsing and packet builders", TestMountainClimbProtocol);
                 Run("Map-teleport protocol and recorded destination catalog", TestMapTeleportProtocol);
@@ -412,6 +413,129 @@ namespace TianshuQitanLauncher.Tests
                     coordinator.Stop();
                     while (transport.Sent.TryTake(out unexpected)) { }
                     Assert(!transport.Sent.TryTake(out unexpected, 350), "stop cancels patrol packets");
+                }
+            }
+        }
+
+        private static byte[] BuildCombatMapInfo(int mapId)
+        {
+            using (MemoryStream stream = new MemoryStream())
+            {
+                stream.Write(new byte[] { 0, 0, 0, 0x55 }, 0, 4);
+                WriteUInt32BigEndian(stream, (uint)mapId);
+                WriteUtf8String(stream, "祭牙台地");
+                WriteUInt32BigEndian(stream, 0);
+                WriteUInt32BigEndian(stream, 32);
+                byte[] bytes = stream.ToArray();
+                bytes[0] = (byte)(bytes.Length >> 8);
+                bytes[1] = (byte)bytes.Length;
+                return bytes;
+            }
+        }
+
+        private static void TestStandaloneCombat(string root)
+        {
+            using (ProtocolWorkbenchService service = CreateRunLoopTestService(Path.Combine(root, "standalone-combat")))
+            {
+                RunLoopTestTransport transport = new RunLoopTestTransport();
+                service.AttachCaptureEngine(transport);
+                RunLoopWalkOptions options = new RunLoopWalkOptions
+                {
+                    StepIntervalMs = 50, InitialDelayMs = 30, RecoveryIntervalMs = 120,
+                    MapDataWaitTimeoutMs = 150, NoProgressTimeoutMs = 3000
+                };
+                using (RunLoopAutomationCoordinator coordinator = new RunLoopAutomationCoordinator(service, options))
+                using (AutomaticCombatControl control = new AutomaticCombatControl(coordinator))
+                {
+                    control.CreateControl();
+                    Button toggle = FindControls<Button>(control).First(item => item.Text == "开启自动战斗");
+                    Assert(!coordinator.StandaloneCombatRunning, "standalone combat defaults to off");
+                    AssertThrows(delegate { coordinator.StartStandaloneCombat(true); }, "missing connection is rejected");
+                    Assert(string.IsNullOrEmpty(service.CurrentAutomationOwner), "rejected start does not acquire automation");
+                    service.RecordConnection(new ConnectionSession
+                    {
+                        Id = 1, Kind = ConnectionKind.Game, State = "Connected", OpenedUtc = DateTime.UtcNow,
+                        RemotePort = 12345, RemoteEndPoint = "127.0.0.1:12345"
+                    }, "Connected");
+                    FeedRunLoopFrame(service, TianshuBountyProtocol.BuildNpcOpen(93290, 10), TrafficDirection.ClientToServer);
+                    FeedRunLoopFrame(service, BuildCombatMapInfo(95), TrafficDirection.ServerToClient);
+                    byte[] cells = new byte[25];
+                    for (int col = 0; col < 4; col++) cells[2 * 5 + col] = 1;
+                    byte[] mapData = BuildRunLoopMapDataFrame(95, 64, 32, 5, 5, cells);
+                    FeedRunLoopFrame(service, mapData, TrafficDirection.ServerToClient);
+                    Assert(!service.PacketCaptureEnabled, "combat test runs with recording off");
+                    toggle.PerformClick();
+                    Assert(coordinator.StandaloneCombatRunning, "one click starts standalone combat");
+                    AssertEqual("关闭自动战斗", toggle.Text, "toggle shows enabled state");
+                    AssertEqual("AutoCombat", service.CurrentAutomationOwner, "standalone owns packet automation");
+                    int[] expectedX = { 64, 128, 192, 128, 64, 0 };
+                    int movementCount = 0;
+                    int recoveryCount = 0;
+                    HashSet<uint> sequences = new HashSet<uint>();
+                    Stopwatch deadline = Stopwatch.StartNew();
+                    while ((movementCount < expectedX.Length || recoveryCount == 0) && deadline.ElapsedMilliseconds < 2500)
+                    {
+                        byte[] packet;
+                        if (!transport.Sent.TryTake(out packet, 200)) continue;
+                        uint sequence;
+                        Assert(TianshuBountyProtocol.TryReadClientSequence(packet, out sequence), "combat packets carry a live sequence");
+                        Assert(sequences.Add(sequence), "movement and recovery never reuse a sequence");
+                        if (TianshuBountyProtocol.HasOpcode(packet, TianshuRunLoopProtocol.ClientMovement))
+                        {
+                            long timestamp; int mapId; ushort x; ushort y;
+                            Assert(TianshuRunLoopProtocol.TryParseMovement(packet, out timestamp, out mapId, out x, out y), "standalone movement parses");
+                            AssertEqual(95, mapId, "standalone stays on current map");
+                            if (movementCount < expectedX.Length) AssertEqual((ushort)expectedX[movementCount], x, "standalone reuses unchanged patrol");
+                            AssertEqual((ushort)32, y, "standalone remains on walkable cells");
+                            movementCount++;
+                        }
+                        else
+                        {
+                            AssertEqual(HexCodec.Format(TianshuRunLoopProtocol.BuildOneKeyRecovery(sequence)),
+                                HexCodec.Format(packet), "standalone uses exact existing recovery packet");
+                            recoveryCount++;
+                        }
+                    }
+                    Assert(movementCount >= 6 && recoveryCount > 0, "standalone sends movement and recovery");
+                    toggle.PerformClick();
+                    Assert(!coordinator.StandaloneCombatRunning && !service.ActiveMode, "one click stops and restores ACTIVE");
+                    byte[] unexpected;
+                    while (transport.Sent.TryTake(out unexpected)) { }
+                    Assert(!transport.Sent.TryTake(out unexpected, 180), "stop cancels movement and recovery timers");
+
+                    // Standalone must neither turn in nor travel in response to run-loop tasks.
+                    coordinator.StartStandaloneCombat(false);
+                    FeedRunLoopFrame(service, BuildRunLoopTaskFrame(1,
+                        "去祭牙台地消灭5个金翅雏鸟后，到近天回廊的天空远征军斥候武诚初(20,66)处领取下一环任务。",
+                        "金翅雏鸟 (0/5),"), TrafficDirection.ServerToClient);
+                    transport.Take(TianshuRunLoopProtocol.ClientMovement);
+                    coordinator.Start(1, false);
+                    Assert(!coordinator.StandaloneCombatRunning, "run-loop takes over standalone combat");
+                    AssertEqual("AutoRunLoop", service.CurrentAutomationOwner, "run-loop acquires automation after handoff");
+                    transport.Take(TianshuBountyProtocol.ClientTravelLink);
+                    FeedRunLoopFrame(service, BuildCombatMapInfo(95), TrafficDirection.ServerToClient);
+                    FeedRunLoopFrame(service, mapData, TrafficDirection.ServerToClient);
+                    AssertEqual(RunLoopAutomationState.WalkingForEncounter, coordinator.State, "run-loop automatically enables the shared combat path");
+                    coordinator.StopStandaloneCombat();
+                    AssertEqual(RunLoopAutomationState.WalkingForEncounter, coordinator.State, "standalone stop cannot disable run-loop combat");
+                    AssertThrows(delegate { coordinator.StartStandaloneCombat(true); }, "duplicate combat start during run-loop is rejected");
+                    transport.Take(TianshuRunLoopProtocol.ClientMovement);
+                    coordinator.Stop();
+                    while (transport.Sent.TryTake(out unexpected)) { }
+
+                    coordinator.StartStandaloneCombat(false);
+                    service.EmergencyBypass();
+                    Assert(!coordinator.StandaloneCombatRunning, "emergency bypass stops standalone combat");
+                    Assert(!transport.Sent.TryTake(out unexpected, 180), "emergency bypass leaves no pending movement");
+                    Assert(string.IsNullOrEmpty(service.CurrentAutomationOwner), "stop releases exclusive ownership");
+
+                    coordinator.StartStandaloneCombat(false);
+                    FeedRunLoopFrame(service, BuildCombatMapInfo(96), TrafficDirection.ServerToClient);
+                    Assert(!coordinator.StandaloneCombatRunning, "map change stops standalone combat");
+                    coordinator.StartStandaloneCombat(false);
+                    Thread.Sleep(250);
+                    AssertEqual(RunLoopAutomationState.Failed, coordinator.State, "missing map grid stops without guessing coordinates");
+                    AssertEqual(0, transport.Sent.Count, "no guessed movement without verified grid");
                 }
             }
         }
@@ -980,6 +1104,8 @@ namespace TianshuQitanLauncher.Tests
                 AssertEqual(2, featureTabs.RowCount, "feature navigation uses two rows at the workbench test width");
                 Assert(featureTabs.TabPages.Cast<TabPage>().Any(item => item.Text == "抓包"),
                     "capture feature has a top-level entry");
+                Assert(featureTabs.TabPages.Cast<TabPage>().Any(item => item.Text == "自动战斗"),
+                    "standalone combat has an accessible feature page");
                 Assert(!featureTabs.TabPages.Cast<TabPage>().Any(item => item.Text == "数据包" ||
                     item.Text == "连接" || item.Text == "协议/字段"),
                     "capture detail pages are not mixed with top-level features");
@@ -1141,6 +1267,22 @@ namespace TianshuQitanLauncher.Tests
                 Assert(menuNames.Contains("清空选中数据包（仅界面）"), "packet menu clears selected rows");
                 Assert(menuNames.Contains("清空全部显示缓存（保留 SQLite）"), "packet menu clears all UI cache");
 
+                ToolStripButton captureButton = (ToolStripButton)typeof(ProtocolWorkbenchControl)
+                    .GetField("captureButton", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(control);
+                int liveChunks = 0;
+                int liveFrames = 0;
+                service.ChunkCaptured += delegate { liveChunks++; };
+                service.FrameCaptured += delegate { liveFrames++; };
+                Assert(!service.PacketCaptureEnabled, "capture defaults to off");
+                AssertEqual("开启抓包", captureButton.Text, "default capture button");
+                service.RecordChunk(CreateChunk(0, 0x10, 0x01));
+                AssertEqual(0, packetGrid.RowCount, "disabled capture does not populate the UI");
+                AssertEqual(1, liveChunks, "automation receives traffic while capture is off");
+                AssertEqual(1, liveFrames, "automation receives decoded frames while capture is off");
+                captureButton.PerformClick();
+                Assert(service.PacketCaptureEnabled, "one click enables capture");
+                AssertEqual("关闭抓包", captureButton.Text, "enabled capture button");
+
                 for (int i = 0; i < 3; i++)
                 {
                     service.RecordChunk(new TransportChunk
@@ -1156,6 +1298,23 @@ namespace TianshuQitanLauncher.Tests
                     });
                 }
                 AssertEqual(3, packetGrid.RowCount, "packet grid receives test rows");
+
+                captureButton.PerformClick();
+                service.RecordChunk(CreateChunk(0, 0x11, 0x02));
+                AssertEqual(3, packetGrid.RowCount, "stopping capture preserves old rows without adding traffic");
+                AssertEqual(5, liveChunks, "automation still receives traffic after stopping capture");
+                captureButton.PerformClick();
+                Assert(service.PacketCaptureEnabled, "capture can be restarted");
+                service.SetOperationRecorderEnabled(true, false);
+                service.SelectOperationDefinition(new AtomicOperationDefinition { Name = "capture interruption" });
+                service.StartAtomicOperation();
+                captureButton.PerformClick();
+                AssertEqual(OperationRecordingState.Ready, service.OperationRecorder.State,
+                    "stopping capture ends the active atomic recording");
+                service.StartAtomicOperation();
+                Assert(service.PacketCaptureEnabled, "atomic recording automatically enables packet capture");
+                AssertEqual("关闭抓包", captureButton.Text, "atomic recording synchronizes capture button");
+                captureButton.PerformClick();
 
                 packetGrid.ClearSelection();
                 packetGrid.Rows[0].Selected = true;

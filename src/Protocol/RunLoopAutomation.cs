@@ -786,6 +786,7 @@ namespace TianshuQitanLauncher.Protocol
     public sealed class RunLoopAutomationCoordinator : IDisposable
     {
         private const string AutomationOwner = "AutoRunLoop";
+        private const string CombatAutomationOwner = "AutoCombat";
         private const int StartNpcId = 93290;
         private const int StartMapId = 72;
         private const int RingsPerRound = 20;
@@ -796,9 +797,8 @@ namespace TianshuQitanLauncher.Protocol
         private readonly object syncRoot = new object();
         private readonly ProtocolWorkbenchService service;
         private readonly RunLoopWalkOptions walkOptions;
-        private RunLoopPatrolPath patrolPath;
-        private readonly Stopwatch huntProgressWatch = new Stopwatch();
-        private readonly Stopwatch mapDataWaitWatch = new Stopwatch();
+        private readonly AutomaticCombatPatrol combatPatrol;
+        private bool standaloneCombat;
         private readonly Dictionary<long, ConnectionSession> gameConnections = new Dictionary<long, ConnectionSession>();
         private readonly Dictionary<string, BountyTravelTarget> npcDirectory = new Dictionary<string, BountyTravelTarget>(StringComparer.Ordinal);
         private readonly ManualResetEvent catalogReady = new ManualResetEvent(false);
@@ -830,12 +830,12 @@ namespace TianshuQitanLauncher.Protocol
         private int expectedNextRing;
         private bool automaticRecovery;
         private bool activatedByAutomation;
-        private int walkStep;
         private int huntRetryCount;
         private int generation;
         private bool disposed;
 
         public event Action<RunLoopAutomationState, string> StatusChanged;
+        public event Action<RunLoopAutomationState, string> StandaloneCombatStatusChanged;
 
         public RunLoopAutomationCoordinator(ProtocolWorkbenchService service)
             : this(service, new RunLoopWalkOptions())
@@ -848,6 +848,7 @@ namespace TianshuQitanLauncher.Protocol
             if (walkOptions == null) throw new ArgumentNullException("walkOptions");
             this.service = service;
             this.walkOptions = walkOptions.ValidatedCopy();
+            combatPatrol = new AutomaticCombatPatrol(this.walkOptions);
             state = RunLoopAutomationState.Inactive;
             SeedNpcDirectory();
             LoadPersistedNpcCatalog();
@@ -862,6 +863,46 @@ namespace TianshuQitanLauncher.Protocol
         public int CompletedRings { get { lock (syncRoot) return completedRings; } }
         public int PlannedRounds { get { lock (syncRoot) return plannedRounds; } }
         public RunLoopTask CurrentTask { get { lock (syncRoot) return latestTask == null ? null : latestTask.Clone(); } }
+        public bool StandaloneCombatRunning { get { lock (syncRoot) return standaloneCombat && IsRunning(state); } }
+
+        public void StartStandaloneCombat(bool enableAutomaticRecovery)
+        {
+            int currentGeneration;
+            bool enableActive;
+            lock (syncRoot)
+            {
+                if (disposed) throw new ObjectDisposedException(GetType().Name);
+                if (IsRunning(state))
+                    throw new InvalidOperationException("跑环或独立战斗正在运行；跑环会自动启用战斗，无需重复开启。");
+                if (gameConnectionId == 0 || !sequenceKnown || currentMapId <= 0)
+                    throw new InvalidOperationException("尚未取得游戏连接、地图或发包序号，请进入游戏并移动一次后开启。");
+                string owner;
+                if (!service.TryAcquireAutomation(CombatAutomationOwner, out owner))
+                    throw new InvalidOperationException("当前已有自动化流程正在运行：" + owner + "。请先停止后开启自动战斗。");
+                standaloneCombat = true;
+                currentGeneration = ++generation;
+                DisposeTimersLocked();
+                automaticRecovery = enableAutomaticRecovery;
+                currentDestination = null;
+                destinationPurpose = DestinationPurpose.None;
+                route = null;
+                expectedMapAfterPortal = 0;
+                enableActive = !service.ActiveMode;
+                activatedByAutomation = enableActive;
+                state = RunLoopAutomationState.WalkingForEncounter;
+            }
+            if (enableActive) service.SetActiveMode(true, false);
+            StartWalking(currentGeneration);
+        }
+
+        public void StopStandaloneCombat()
+        {
+            lock (syncRoot)
+            {
+                if (!standaloneCombat) return;
+                StopCore(RunLoopAutomationState.Stopped, "独立自动战斗已关闭。", false);
+            }
+        }
 
         public void Start(int roundCount, bool enableAutomaticRecovery)
         {
@@ -908,6 +949,7 @@ namespace TianshuQitanLauncher.Protocol
         private void Begin(int roundCount, bool enableAutomaticRecovery, bool resumeFromCurrent)
         {
             if (roundCount < 1 || roundCount > MaximumPlannedRounds) throw new ArgumentOutOfRangeException("roundCount");
+            StopStandaloneCombat();
             string owner;
             if (!service.TryAcquireAutomation(AutomationOwner, out owner))
                 throw new InvalidOperationException("当前已有自动化流程正在运行：" + owner + "。请先停止后再启动自动跑环。");
@@ -924,6 +966,7 @@ namespace TianshuQitanLauncher.Protocol
                     throw new ObjectDisposedException(GetType().Name);
                 }
                 generation++;
+                standaloneCombat = false;
                 currentGeneration = generation;
                 DisposeTimersLocked();
                 plannedRounds = roundCount;
@@ -989,6 +1032,7 @@ namespace TianshuQitanLauncher.Protocol
             service.FrameCaptured -= OnFrameCaptured;
             service.ActiveModeChanged -= OnActiveModeChanged;
             service.ReleaseAutomation(AutomationOwner);
+            service.ReleaseAutomation(CombatAutomationOwner);
             if (restore && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1150,6 +1194,8 @@ namespace TianshuQitanLauncher.Protocol
                 long selected = SelectLatestGameConnectionLocked();
                 if (selected != gameConnectionId)
                 {
+                    if (standaloneCombat && IsRunning(state))
+                        StopCore(RunLoopAutomationState.Stopped, "游戏连接已断开或切换，独立自动战斗已停止。", false);
                     gameConnectionId = selected;
                     sequenceKnown = false;
                     nextSequence = 0;
@@ -1176,6 +1222,8 @@ namespace TianshuQitanLauncher.Protocol
                 if (frame.Direction == TrafficDirection.ClientToServer && IsSequenceOpcode(opcode) &&
                     frame.ConnectionId != gameConnectionId && gameConnections.ContainsKey(frame.ConnectionId))
                 {
+                    if (standaloneCombat && IsRunning(state))
+                        StopCore(RunLoopAutomationState.Stopped, "游戏连接已切换，独立自动战斗已停止。", false);
                     gameConnectionId = frame.ConnectionId;
                     sequenceKnown = false;
                     nextSequence = 0;
@@ -1203,6 +1251,11 @@ namespace TianshuQitanLauncher.Protocol
             }
             if (begin) { BeginTaskOrStart(currentGeneration); return; }
             if (frame.Direction != TrafficDirection.ServerToClient || frame.ConnectionId != GetGameConnectionId()) return;
+
+            if (StandaloneCombatRunning && opcode == TianshuBountyProtocol.ServerBattlePrompt)
+            {
+                lock (syncRoot) combatPatrol.MarkProgress();
+            }
 
             if (opcode == TianshuRunLoopProtocol.ServerTaskUpdate)
             {
@@ -1237,7 +1290,7 @@ namespace TianshuQitanLauncher.Protocol
                 LearnEntities(frame.Bytes);
                 return;
             }
-            if (!IsRunning(State)) return;
+            if (!IsRunning(State) || StandaloneCombatRunning) return;
             if (opcode == TianshuBountyProtocol.ServerSystemMessage &&
                 TianshuBountyProtocol.ContainsText(frame.Bytes, "跑环") &&
                 (TianshuBountyProtocol.ContainsText(frame.Bytes, "上限") ||
@@ -1273,14 +1326,14 @@ namespace TianshuQitanLauncher.Protocol
                 expectedNextRing = 0;
                 latestTask = task.Clone();
                 latestTaskUtc = DateTime.UtcNow;
-                running = IsCurrentLocked(expectedGeneration);
+                running = IsCurrentLocked(expectedGeneration) && !standaloneCombat;
                 if (!running) return;
                 changed = previous == null;
                 if (previous != null && previous.Kind == RunLoopTaskKind.Hunt &&
                     task.Kind == RunLoopTaskKind.Hunt && task.Progress > previous.Progress)
                 {
                     progressChanged = true;
-                    huntProgressWatch.Restart();
+                    combatPatrol.MarkProgress();
                     huntRetryCount = 0;
                 }
             }
@@ -1340,7 +1393,7 @@ namespace TianshuQitanLauncher.Protocol
             {
                 if (disposed) return;
                 removedRing = pendingTurnInRing;
-                running = IsCurrentLocked(expectedGeneration);
+                running = IsCurrentLocked(expectedGeneration) && !standaloneCombat;
                 if (running && removedRing == 0) return;
                 // Duplicate removals and unrelated task removals must not count twice.
                 if (removedRing == 0 && latestTask == null) return;
@@ -1498,12 +1551,14 @@ namespace TianshuQitanLauncher.Protocol
             bool portalArrival;
             lock (syncRoot)
             {
+                if (standaloneCombat && IsRunning(state) && map.MapId != currentMapId)
+                    StopCore(RunLoopAutomationState.Stopped, "当前地图已切换，独立自动战斗已停止；可在新地图重新开启。", false);
                 currentMapId = map.MapId;
                 currentMapName = map.MapName;
                 currentScaledX = map.ScaledX;
                 currentScaledY = map.ScaledY;
                 currentMapGrid = null;
-                patrolPath = null;
+                combatPatrol.ResetPath(false);
                 running = IsCurrentLocked(expectedGeneration);
                 matches = running && currentDestination != null && map.MapId == currentDestination.MapId &&
                     (state == RunLoopAutomationState.Traveling || state == RunLoopAutomationState.WaitingForMap ||
@@ -1635,10 +1690,7 @@ namespace TianshuQitanLauncher.Protocol
             {
                 if (!IsCurrentLocked(expectedGeneration)) return;
                 state = RunLoopAutomationState.WalkingForEncounter;
-                walkStep = 0;
-                patrolPath = null;
-                huntProgressWatch.Restart();
-                mapDataWaitWatch.Restart();
+                combatPatrol.Restart();
                 DisposeStageTimerLocked();
                 DisposeCombatTimersLocked();
                 walkTimer = new System.Threading.Timer(delegate { SendWalkStep(expectedGeneration); }, null,
@@ -1649,7 +1701,8 @@ namespace TianshuQitanLauncher.Protocol
             }
             Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter,
                 "已到 " + currentMapName + "，每 " + walkOptions.StepIntervalMs + "ms 在最多 " +
-                walkOptions.PatrolPointCount + " 个有效点之间往返走步；战斗结果由任务进度包确认。", false);
+                walkOptions.PatrolPointCount + " 个有效点之间往返走步；" +
+                (standaloneCombat ? "独立自动战斗已开启。" : "战斗结果由任务进度包确认。"), false);
         }
 
         private void SendWalkStep(int expectedGeneration)
@@ -1660,27 +1713,17 @@ namespace TianshuQitanLauncher.Protocol
             {
                 if (!IsCurrentLocked(expectedGeneration) || state != RunLoopAutomationState.WalkingForEncounter) return;
                 mapId = currentMapId;
-                stuck = huntProgressWatch.ElapsedMilliseconds >= walkOptions.NoProgressTimeoutMs;
+                stuck = combatPatrol.ProgressTimedOut;
                 if (!stuck)
                 {
-                    if (patrolPath == null)
-                    {
-                        RunLoopMapGrid grid = currentMapGrid != null && currentMapGrid.MapId == mapId ? currentMapGrid : null;
-                        if (!RunLoopPatrolPath.TryCreate(grid, currentScaledX, currentScaledY,
-                            walkOptions.PatrolPointCount, out patrolPath))
-                        {
-                            if (mapDataWaitWatch.ElapsedMilliseconds >= walkOptions.MapDataWaitTimeoutMs)
-                                Fail(expectedGeneration, "未能从当前地图数据找到至少两个相连的可行走点，已停止自动遇怪。");
-                            return;
-                        }
-                        Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter,
-                            "已固定 " + patrolPath.Points.Count + " 个有效走步点，开始循环往返。", false);
-                    }
-                    if (mapId <= 0) { Fail(expectedGeneration, "尚未取得当前地图 ID，无法构造走步包。"); return; }
-                    Point point = patrolPath.Next();
+                    Point? next = combatPatrol.Next(currentMapGrid, mapId, currentScaledX, currentScaledY,
+                        delegate(string message) { Fail(expectedGeneration, message); },
+                        delegate(string message) { Publish(expectedGeneration, RunLoopAutomationState.WalkingForEncounter, message, false); });
+                    if (!next.HasValue) return;
+                    Point point = next.Value;
                     currentScaledX = (ushort)point.X;
                     currentScaledY = (ushort)point.Y;
-                    int step = ++walkStep;
+                    int step = combatPatrol.StepCount;
                     long epoch = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
                     // Serialize the timer callbacks through packet submission so route order cannot overlap.
                     SendPacket(expectedGeneration, "循环走步遇怪 " + step, delegate(uint sequence)
@@ -1707,9 +1750,14 @@ namespace TianshuQitanLauncher.Protocol
             lock (syncRoot)
             {
                 if (!IsCurrentLocked(expectedGeneration)) return;
+                if (standaloneCombat)
+                {
+                    Fail(expectedGeneration, "长时间未收到战斗提示，独立自动战斗已停止，请检查当前位置是否可遇怪。");
+                    return;
+                }
                 task = latestTask == null ? null : latestTask.Clone();
                 retries = huntRetryCount;
-                huntProgressWatch.Restart();
+                combatPatrol.MarkProgress();
                 DisposeCombatTimersLocked();
                 state = RunLoopAutomationState.WaitingForTask;
             }
@@ -1891,15 +1939,14 @@ namespace TianshuQitanLauncher.Protocol
                 if (disposed) return;
                 if (grid.MapId != currentMapId) return;
                 currentMapGrid = grid;
-                patrolPath = null;
-                mapDataWaitWatch.Restart();
+                combatPatrol.ResetPath(true);
             }
         }
 
         private void OnActiveModeChanged(bool active)
         {
             if (!active && IsRunning(State))
-                StopCore(RunLoopAutomationState.Stopped, "ACTIVE/发包模式已关闭，自动跑环同步停止。", false);
+                StopCore(RunLoopAutomationState.Stopped, "ACTIVE/发包模式已关闭，自动流程同步停止。", false);
         }
 
         private void SendPacket(int expectedGeneration, string description, Func<uint, byte[]> factory)
@@ -1918,7 +1965,7 @@ namespace TianshuQitanLauncher.Protocol
                 Fail(expectedGeneration, description + "发包失败；连接可能已关闭或 ACTIVE 已关闭。");
                 return;
             }
-            service.ReportEngineEvent(AutomationOwner, "INFO", description + "，opcode=0x" +
+            service.ReportEngineEvent(standaloneCombat ? CombatAutomationOwner : AutomationOwner, "INFO", description + "，opcode=0x" +
                 ((packet[2] << 8) | packet[3]).ToString("X4") + "，seq=" + sequence + "，len=" + packet.Length, connectionId);
         }
 
@@ -1957,6 +2004,7 @@ namespace TianshuQitanLauncher.Protocol
             }
             Publish(expectedGeneration, RunLoopAutomationState.Completed, message, false);
             service.ReleaseAutomation(AutomationOwner);
+            service.ReleaseAutomation(CombatAutomationOwner);
             if (restore && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1973,6 +2021,7 @@ namespace TianshuQitanLauncher.Protocol
             }
             Publish(expectedGeneration, RunLoopAutomationState.Failed, message, true);
             service.ReleaseAutomation(AutomationOwner);
+            service.ReleaseAutomation(CombatAutomationOwner);
             if (restore && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -1990,6 +2039,7 @@ namespace TianshuQitanLauncher.Protocol
             }
             PublishAny(finalState, message, error);
             service.ReleaseAutomation(AutomationOwner);
+            service.ReleaseAutomation(CombatAutomationOwner);
             if (restore && service.ActiveMode) service.SetActiveMode(false, false);
         }
 
@@ -2001,10 +2051,11 @@ namespace TianshuQitanLauncher.Protocol
 
         private void PublishAny(RunLoopAutomationState publishedState, string message, bool error)
         {
-            Action<RunLoopAutomationState, string> handler = StatusChanged;
+            Action<RunLoopAutomationState, string> handler = standaloneCombat ? StandaloneCombatStatusChanged : StatusChanged;
             if (handler != null) handler(publishedState, message);
             long id = GetGameConnectionId();
-            service.ReportEngineEvent(AutomationOwner, error ? "ERROR" : "INFO", message, id == 0 ? (long?)null : id);
+            service.ReportEngineEvent(standaloneCombat ? CombatAutomationOwner : AutomationOwner,
+                error ? "ERROR" : "INFO", message, id == 0 ? (long?)null : id);
         }
 
         private void ScheduleAction(int expectedGeneration, int delayMs, Action<int> callback)

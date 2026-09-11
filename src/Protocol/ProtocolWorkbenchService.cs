@@ -12,6 +12,8 @@ namespace TianshuQitanLauncher.Protocol
     {
         private readonly object syncRoot = new object();
         private readonly object waitRoot = new object();
+        private readonly object captureRoot = new object();
+        private volatile bool packetCaptureEnabled;
         private readonly Dictionary<string, FrameStream> streams = new Dictionary<string, FrameStream>();
         private readonly Dictionary<long, ConnectionSession> connections = new Dictionary<long, ConnectionSession>();
         private readonly WorkbenchProfile profile;
@@ -64,6 +66,10 @@ namespace TianshuQitanLauncher.Protocol
         public event Action<ConnectionSession> ConnectionChanged;
         public event Action<TransportChunk> ChunkCaptured;
         public event Action<ProtocolFrame> FrameCaptured;
+        // Recorded events feed the capture UI; live events above also feed automation.
+        public event Action<TransportChunk> ChunkRecorded;
+        public event Action<ProtocolFrame> FrameRecorded;
+        public event Action<bool> PacketCaptureEnabledChanged;
         public event Action<StateTransition> StateChanged;
         public event Action<WorkbenchEvent> EventRaised;
         public event Action<ScenarioResult> ScenarioCompleted;
@@ -79,6 +85,7 @@ namespace TianshuQitanLauncher.Protocol
         public IStateTracker States { get { return stateTracker; } }
         public string DatabasePath { get { return store.DatabasePath; } }
         public bool ActiveMode { get { lock (syncRoot) { return activeMode; } } }
+        public bool PacketCaptureEnabled { get { return packetCaptureEnabled; } }
         public IAtomicOperationRecorder OperationRecorder { get { return operationRecorder; } }
         public IOperationRepository Operations { get { return operationRepository; } }
 
@@ -142,7 +149,31 @@ namespace TianshuQitanLauncher.Protocol
                 throw new InvalidOperationException("Capture engine is not attached.");
             }
             captureEngine.Start();
-            PublishEvent("Capture", "INFO", "Winsock capture started. Database: " + DatabasePath, null);
+            PublishEvent("Capture", "INFO", "网络通信处理已启动；抓包记录默认关闭，可点击“开启抓包”。", null);
+        }
+
+        public void SetPacketCaptureEnabled(bool enabled)
+        {
+            lock (captureRoot)
+            {
+                if (disposed) throw new ObjectDisposedException(GetType().Name);
+                if (packetCaptureEnabled == enabled) return;
+                if (!enabled) operationRecorder.Interrupt("抓包已关闭，原子操作录制中断。");
+                packetCaptureEnabled = enabled;
+                if (enabled)
+                {
+                    lock (syncRoot)
+                    {
+                        foreach (ConnectionSession connection in connections.Values)
+                            store.EnqueueConnection(connection.Clone());
+                    }
+                }
+                Action<bool> handler = PacketCaptureEnabledChanged;
+                if (handler != null) handler(enabled);
+                PublishEvent("Capture", "INFO", enabled
+                    ? "抓包已开启。数据库：" + DatabasePath
+                    : "抓包已关闭，已有记录保留。", null);
+            }
         }
 
         public void StopCapture()
@@ -211,9 +242,13 @@ namespace TianshuQitanLauncher.Protocol
 
         public AtomicOperationRun StartAtomicOperation()
         {
-            AtomicOperationRun run = operationRecorder.Start();
-            PublishEvent("AtomicOperation", "INFO", "Recording started: " + run.DefinitionId, null);
-            return run;
+            lock (captureRoot)
+            {
+                AtomicOperationRun run = operationRecorder.Start();
+                SetPacketCaptureEnabled(true);
+                PublishEvent("AtomicOperation", "INFO", "Recording started: " + run.DefinitionId, null);
+                return run;
+            }
         }
 
         public AtomicOperationRun StopAtomicOperation(OperationOutcome outcome, string actualResult, string notes)
@@ -431,13 +466,23 @@ namespace TianshuQitanLauncher.Protocol
             {
                 connections[connection.Id] = connection.Clone();
             }
-            store.EnqueueConnection(connection);
             StateTransition transition = stateTracker.AcceptConnectionEvent(connection.Id, eventName);
+            lock (captureRoot)
+            {
+                if (packetCaptureEnabled)
+                {
+                    store.EnqueueConnection(connection);
+                    if (transition != null)
+                    {
+                        transition.SessionId = store.SessionId;
+                        operationRecorder.ObserveState(connection, transition);
+                        store.EnqueueStateTransition(transition);
+                    }
+                }
+            }
             if (transition != null)
             {
                 transition.SessionId = store.SessionId;
-                operationRecorder.ObserveState(connection, transition);
-                store.EnqueueStateTransition(transition);
                 RaiseStateChanged(transition);
             }
             Action<ConnectionSession> handler = ConnectionChanged;
@@ -476,15 +521,30 @@ namespace TianshuQitanLauncher.Protocol
                     transitions.Add(transition);
                 }
             }
-            operationRecorder.ObserveBatch(connection, chunk, decodedFrames, transitions);
-            store.EnqueueChunk(chunk);
+            lock (captureRoot)
+            {
+                if (packetCaptureEnabled)
+                {
+                    operationRecorder.ObserveBatch(connection, chunk, decodedFrames, transitions);
+                    store.EnqueueChunk(chunk);
+                    Action<TransportChunk> recordedChunkHandler = ChunkRecorded;
+                    if (recordedChunkHandler != null) recordedChunkHandler(chunk);
+                    foreach (ProtocolFrame frame in decodedFrames)
+                    {
+                        store.EnqueueFrame(frame);
+                        Action<ProtocolFrame> recordedFrameHandler = FrameRecorded;
+                        if (recordedFrameHandler != null) recordedFrameHandler(frame);
+                    }
+                    foreach (StateTransition transition in transitions)
+                        store.EnqueueStateTransition(transition);
+                }
+            }
             Action<TransportChunk> chunkHandler = ChunkCaptured;
             if (chunkHandler != null) chunkHandler(chunk);
 
             for (int i = 0; i < decodedFrames.Count; i++)
             {
                 ProtocolFrame frame = decodedFrames[i];
-                store.EnqueueFrame(frame);
                 Action<ProtocolFrame> frameHandler = FrameCaptured;
                 if (frameHandler != null)
                 {
@@ -498,7 +558,6 @@ namespace TianshuQitanLauncher.Protocol
             }
             for (int i = 0; i < transitions.Count; i++)
             {
-                store.EnqueueStateTransition(transitions[i]);
                 RaiseStateChanged(transitions[i]);
             }
         }
